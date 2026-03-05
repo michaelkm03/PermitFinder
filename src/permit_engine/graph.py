@@ -82,7 +82,7 @@ def build_graph(
     raw_sites       : output of api.fetch_sites() or mock.fetch_sites()
     raw_trails      : output of api.fetch_trails() or mock.fetch_trails()
     allow_trailhead : when True, also connect sites at shared trailhead nodes
-                      (parking lots where separate trails begin / end).
+                      (parking lots where separatere trails begin / end).
     """
     sites = {s["division_id"]: Site(**s) for s in raw_sites}
 

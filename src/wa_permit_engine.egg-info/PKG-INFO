@@ -1,0 +1,121 @@
+Metadata-Version: 2.4
+Name: wa-permit-engine
+Version: 5.0.0
+Summary: Washington State backcountry permit chain finder
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.31.0
+Requires-Dist: shapely>=2.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
+
+# wa-permits
+
+Find multi-night backpacking chains in Washington State national parks where every campsite has available permits.
+
+## How it works
+
+1. **Trail graph** — fetches all permit campsites from Recreation.gov (`/api/permitcontent`) and all hiking trails from OpenStreetMap. Sites that snap onto the same trail polyline are connected as adjacent nodes. No distance or elevation constraints: if a physical trail connects two sites, they are adjacent.
+
+2. **Availability** — fetches real-time per-night permit quota from Recreation.gov (`/api/permititinerary`).
+
+3. **DFS search** — walks the trail graph to find every valid multi-night sequence, annotating each night with its remaining permit count.
+
+## Supported parks
+
+| Key | Park |
+|---|---|
+| `rainier` | Mount Rainier |
+| `north-cascades` | North Cascades |
+| `olympic` | Olympic National Park |
+
+## Installation
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Usage
+
+```bash
+# All 2-night chains for North Cascades (mock data, no network calls)
+wa-permits north-cascades --start-date 2026-07-15 --nights 2
+
+# Same query with live Recreation.gov + OpenStreetMap data
+wa-permits north-cascades --start-date 2026-07-15 --nights 5 --live
+
+# Only show chains where every site has >= 2 permits available
+wa-permits rainier --start-date 2026-07-22 --nights 7 --live \
+    --permit-count 2 --available
+
+# Include connections between sites at shared trailhead parking lots
+wa-permits olympic --start-date 2026-08-01 --nights 4 --trailhead
+```
+
+## CLI reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `park` | required | Park to search (`rainier`, `north-cascades`, `olympic`) |
+| `--start-date` | required | First night of the trip (`YYYY-MM-DD`) |
+| `--nights` | required | Number of nights |
+| `--live` | off | Fetch real-time data from Recreation.gov and OpenStreetMap |
+| `--permit-count` | `1` | Permits needed (party size). Used with `--available` |
+| `--available` | off | Only show chains where every night has >= `--permit-count` remaining |
+| `--trailhead` | off | Include connections between sites at shared trailhead parking lots |
+
+### `--available` vs no filter
+
+Without `--available`: all physically possible chains are shown with availability counts for reference. Useful for route planning before booking season opens.
+
+With `--available`: only chains where **every night** has `remaining >= permit_count` are shown. Use this when actively trying to book.
+
+### `--trailhead`
+
+By default, connections between sites on separate trails that share a trailhead parking lot are excluded — a hiker must exit the trail system to make that transition. Pass `--trailhead` to include them.
+
+Genuine mid-trail junctions (a spur branching off a main trail mid-route) are always included regardless of this flag.
+
+## Without `--live` (mock data)
+
+Mock data is based on real North Cascades East Bank Trail division IDs and coordinates sourced from the rec.gov API (March 2026). Availability is synthetic and covers realistic scenarios including fully-booked nights and partial availability. All tests run against mock data.
+
+## Running tests
+
+```bash
+pytest              # run all 50 tests
+pytest -v           # verbose output
+pytest tests/test_graph.py    # graph tests only
+pytest tests/test_search.py   # search and availability tests only
+pytest tests/test_chain.py    # Chain dataclass tests only
+pytest tests/test_mock.py     # mock data tests only
+```
+
+## Project structure
+
+```
+src/permit_engine/
+  api.py      — live API calls (Recreation.gov + OpenStreetMap)
+  mock.py     — offline mock data (same return shapes as api.py)
+  graph.py    — trail graph builder (site snapping, adjacency, trailhead detection)
+  search.py   — DFS chain finder and availability filter
+  cli.py      — wa-permits entry point
+
+tests/
+  conftest.py       — shared fixtures (built from mock data)
+  test_graph.py     — graph structure and adjacency tests
+  test_search.py    — DFS correctness and availability filtering tests
+  test_chain.py     — Chain dataclass property tests
+  test_mock.py      — mock data shape validation tests
+```
+
+## Data sources
+
+All three APIs require no authentication:
+
+| Data | Endpoint |
+|---|---|
+| Permit sites (names, GPS) | `GET recreation.gov/api/permitcontent/{facility_id}` |
+| Per-night availability | `GET recreation.gov/api/permititinerary/{facility_id}/division/{div_id}/availability/month` |
+| Hiking trails | OpenStreetMap Overpass API |

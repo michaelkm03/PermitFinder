@@ -67,6 +67,7 @@ def find_chains(
     availability: dict[str, dict[str, int]],
     start_date: date,
     nights: int,
+    min_nights: int | None = None,
 ) -> list[Chain]:
     """
     Find all valid multi-night chains in the graph.
@@ -75,13 +76,16 @@ def find_chains(
     availability : division_id → {date_str → remaining_count}
                    Pass an empty dict to skip availability filtering entirely.
     start_date   : first night of the trip
-    num_nights   : total number of nights
+    nights       : maximum (and default exact) number of nights
+    min_nights   : if set, also collect chains of this length up to nights.
+                   If None, only chains of exactly nights are returned.
 
-    Returns all chains of exactly num_nights length. Each site appears at
-    most once per chain (no revisiting the same campsite on the same trip).
-    Availability is annotated on every link but does NOT filter results here —
+    Returns chains sorted longest-first when min_nights is set.
+    Each site appears at most once per chain (no revisiting).
+    Availability is annotated on every link but does NOT filter results —
     use filter_by_availability() after this call if needed.
     """
+    effective_min = min_nights if min_nights is not None else nights
     all_chains: list[Chain] = []
 
     for start_site_id in graph.sites:
@@ -98,11 +102,14 @@ def find_chains(
             availability=availability,
             current_date=start_date,
             nights_remaining=nights - 1,
+            min_nights=effective_min,
             links=links,
             visited=visited,
             all_chains=all_chains,
         )
 
+    if min_nights is not None:
+        all_chains.sort(key=lambda c: -c.num_nights)
     return all_chains
 
 
@@ -124,16 +131,19 @@ def _dfs(
     availability: dict[str, dict[str, int]],
     current_date: date,
     nights_remaining: int,
+    min_nights: int,
     links: list[ChainLink],
     visited: set[str],
     all_chains: list[Chain],
 ) -> None:
     """
-    Recursive DFS. Extends the current chain by one night at a time until
-    num_nights is reached, then records the completed chain.
+    Recursive DFS. Records a chain whenever its length >= min_nights,
+    and keeps extending until nights_remaining == 0 (max nights reached).
     """
-    if nights_remaining == 0:
+    if len(links) >= min_nights:
         all_chains.append(Chain(links=list(links)))
+
+    if nights_remaining == 0:
         return
 
     current_site_id = links[-1].site.division_id
@@ -157,6 +167,7 @@ def _dfs(
             availability=availability,
             current_date=next_date,
             nights_remaining=nights_remaining - 1,
+            min_nights=min_nights,
             links=links,
             visited=visited,
             all_chains=all_chains,

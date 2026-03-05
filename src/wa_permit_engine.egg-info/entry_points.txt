@@ -1,0 +1,2 @@
+[console_scripts]
+wa-permits = permit_engine.cli:main
