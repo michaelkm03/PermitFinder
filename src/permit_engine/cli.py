@@ -27,18 +27,33 @@ Usage examples
   # Limit results to the first 20 chains:
   wa-permits --park olympic --start-date 2026-07-15 --nights 5 --live --limit 20
 
+  # Limit API calls to 1 district of sites (reduces traffic; use --limit to cap chains):
+  wa-permits --park olympic --start-date 2026-07-15 --nights 5 --live --detail-limit 1
+
+  # Show district names and site counts for a park (fast, no availability fetch):
+  wa-permits --park olympic --list-areas
+  wa-permits --park olympic --list-areas --live
+
+  # Find multi-night permit chains with availability:
+  wa-permits --park olympic --list-chains --start-date 2026-07-15 --nights 5
+  wa-permits --park olympic --list-chains --start-date 2026-07-15 --nights 5 --live
+
+  # Search only specific areas (case-insensitive substring match):
+  wa-permits --park olympic --list-chains --start-date 2026-07-15 --nights 5 --live --area "Carbon River" "Mowich"
+
   # Output chain data as JSON (progress on stderr, clean JSON on stdout):
-  wa-permits --park rainier --start-date 2026-07-15 --nights 5 --json
-  wa-permits --park all --start-date 2026-07-15 --nights 5 --limit 50 --json > chains.json
+  wa-permits --park rainier --list-chains --start-date 2026-07-15 --nights 5 --json
+  wa-permits --park all --list-chains --start-date 2026-07-15 --nights 5 --limit 50 --json > chains.json
 
   # Variable-length chains (1 through 5 nights), grouped longest-first:
-  wa-permits --park rainier --start-date 2026-07-15 --nights 5 --no-exact-length
+  wa-permits --park rainier --list-chains --start-date 2026-07-15 --nights 5 --no-exact-length
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 
 # Ensure stdout is UTF-8 on Windows so Rich box-drawing and Unicode arrows render.
@@ -102,6 +117,74 @@ def main() -> int:
         for key, park in PARKS.items():
             print(f"  {key:<20}  {park['display_name']}  ({park['permit_type']})")
         print()
+        return 0
+
+    # --list-areas: fast structural overview — site counts per district, no availability fetch.
+    if getattr(args, "list_areas", False):
+        if not args.park:
+            print("--list-areas requires --park (or use --park all)", file=sys.stderr)
+            return 1
+
+        if args.live:
+            from permit_engine import api as _la_ds
+        else:
+            from permit_engine import mock as _la_ds  # type: ignore[assignment]
+
+        from rich.panel import Panel as _Panel
+        park_keys_la = list(PARKS.keys()) if "all" in (args.park or []) else (args.park or [])
+        for pk in park_keys_la:
+            park_cfg = PARKS[pk]
+            t0 = time.perf_counter()
+            sites = _la_ds.fetch_sites(park_cfg["facility_id"])
+            elapsed = time.perf_counter() - t0
+
+            # Group sites by district.
+            district_sites: dict[str, list[dict]] = {}
+            for s in sites:
+                d = (s.get("district") or "—").strip() or "—"
+                district_sites.setdefault(d, []).append(s)
+
+            _console.print(_Panel(
+                f"[dim]{'live data' if args.live else 'mock data'}"
+                f"  ·  {len(sites)} sites  ·  {len(district_sites)} district{'s' if len(district_sites) != 1 else ''}"
+                f"  ·  {elapsed:.2f}s[/dim]",
+                title=f"[bold yellow]{park_cfg['display_name']} — Areas[/bold yellow]",
+                expand=False,
+                border_style="yellow dim",
+            ))
+
+            tbl = Table(
+                box=rich_box.SIMPLE_HEAD,
+                show_header=True,
+                header_style="bold dim",
+                pad_edge=True,
+            )
+            tbl.add_column("Area (District)", min_width=32)
+            tbl.add_column("Sites", justify="right", width=6)
+            tbl.add_column("Node Types", min_width=20)
+
+            for dist in sorted(district_sites):
+                type_set = sorted({
+                    (s.get("type") or "—").strip() or "—"
+                    for s in district_sites[dist]
+                })
+                types_str = ", ".join(type_set)
+                tbl.add_row(dist, str(len(district_sites[dist])), types_str)
+
+            _console.print(tbl)
+            _console.print(
+                f"[dim]  Use --list-chains --start-date DATE --nights N to find permit chains "
+                f"within these areas.[/dim]"
+            )
+            _console.print()
+        return 0
+
+    # Without --list-chains, the chain search does not run.
+    if not getattr(args, "list_chains", False):
+        _console.print("\n[dim]Specify a command:[/dim]")
+        _console.print("  [bold]--list-areas[/bold]   [dim]District overview for a park (fast, no API availability fetch)[/dim]")
+        _console.print("  [bold]--list-chains[/bold]  [dim]Find multi-night permit chains with live or mock availability[/dim]")
+        _console.print("\n[dim]Run wa-permits --help for full usage.[/dim]")
         return 0
 
     # Resolve which parks to search.
@@ -214,41 +297,138 @@ def _search_park(
     n_fetch  = len(connected_ids)
     skipped  = n_total - n_fetch
     availability: dict[str, dict[str, int]] = {}
+    avail_status = "mock"  # updated below for live runs
+    detail_limit = args.detail_limit  # set by --detail-limit (default 25)
+
+    # Target dates: the specific nights we care about. The API returns a full
+    # month, so we filter down to exactly these dates before the DFS.
+    target_dates = {
+        (args.start_date + timedelta(days=d)).strftime("%Y-%m-%d")
+        for d in range(args.nights)
+    }
+
+    _fetch_t0 = time.perf_counter()
 
     if not args.live:
-        print(f"Fetching availability for {n_fetch}/{n_total} connected sites"
-              f"{f' ({skipped} isolated skipped)' if skipped else ''}...",
+        fetch_ids = connected_ids
+        area_msg  = ""
+        if args.area:
+            fetch_ids = [
+                sid for sid in connected_ids
+                if any(f.lower() in (graph.sites[sid].district or "").lower() for f in args.area)
+            ]
+            area_msg = f" (area filter: {len(fetch_ids)} of {n_fetch} connected)"
+        print(f"Fetching availability for {len(fetch_ids)}/{n_total} sites"
+              f"{f' ({skipped} isolated skipped)' if skipped else ''}"
+              f"{area_msg}...",
               end=" ", flush=True, file=_out)
-        for div_id in connected_ids:
-            availability[div_id] = data_source.fetch_availability(
+        for div_id in fetch_ids:
+            raw = data_source.fetch_availability(
                 park["facility_id"], div_id, args.start_date
             )
-        print("done", file=_out)
+            availability[div_id] = {d: v for d, v in raw.items() if d in target_dates}
+        print(f"done [{time.perf_counter() - _fetch_t0:.1f}s]", file=_out)
     else:
         if not connected_ids:
             print(f"No connected sites to query.", file=_out)
         else:
-            site_ids = connected_ids
-            print(f"Fetching availability for {n_fetch}/{n_total} connected sites"
-                  f"{f' ({skipped} isolated skipped)' if skipped else ''}"
-                  f" (probing {site_ids[0]})...", end=" ", flush=True, file=_out)
-            probe = data_source.fetch_availability(
+            # Group connected sites by district; apply --area filter then --detail-limit cap.
+            district_groups: dict[str, list[str]] = {}
+            for sid in connected_ids:
+                dist = (graph.sites[sid].district or "").strip() or "—"
+                district_groups.setdefault(dist, []).append(sid)
+
+            # --area: keep only districts matching any of the user-supplied substrings.
+            if args.area:
+                district_groups = {
+                    dist: sids for dist, sids in district_groups.items()
+                    if any(f.lower() in dist.lower() for f in args.area)
+                }
+                if not district_groups:
+                    _console.print(
+                        f"[yellow]No districts matched --area {args.area!r} for "
+                        f"{park['display_name']}. Available districts:[/yellow]"
+                    )
+                    all_dg: dict[str, list[str]] = {}
+                    for sid in connected_ids:
+                        d = (graph.sites[sid].district or "").strip() or "—"
+                        all_dg.setdefault(d, []).append(sid)
+                    for d in sorted(all_dg):
+                        _console.print(f"  [dim]{d}[/dim]")
+                    return None
+
+            n_districts_total   = len(district_groups)
+            selected_districts  = list(district_groups.keys())[:detail_limit]
+            site_ids            = [sid for d in selected_districts for sid in district_groups[d]]
+            n_capped            = len(site_ids)
+            dist_cap_msg = (
+                f", {len(selected_districts)}/{n_districts_total} district"
+                f"{'s' if len(selected_districts) != 1 else ''}"
+                + (" via --detail-limit" if n_districts_total > len(selected_districts) else "")
+            )
+            api_calls = 0
+
+            print(f"Fetching availability ({n_capped}/{n_total} sites"
+                  f"{f', {skipped} isolated skipped' if skipped else ''}"
+                  f"{dist_cap_msg}) — probing {site_ids[0]}...", end=" ", flush=True, file=_out)
+
+            probe_raw = data_source.fetch_availability(
                 park["facility_id"], site_ids[0], args.start_date, permit_type=permit_type
             )
-            if not probe:
-                print(f"\n  {_YELLOW}Availability API returned no data (quota_type_maps empty + bools all false — pre-season).{_RESET}", file=_out)
-                print(f"  All {n_fetch} connected sites will be treated as availability unknown.", file=_out)
+            api_calls += 1
+            # Filter probe to target dates only.
+            probe = {d: v for d, v in probe_raw.items() if d in target_dates}
+
+            if not probe_raw:
+                # Empty response → pre-season, no quota data at all.
+                print(f"done ({api_calls} call — pre-season, no data) [{time.perf_counter() - _fetch_t0:.1f}s]", file=_out)
+                avail_status = "pre_season"
             else:
-                availability[site_ids[0]] = probe
-                print(f"done (1/{n_fetch})", file=_out)
-                print(f"Fetching remaining {n_fetch - 1} sites...", end=" ", flush=True, file=_out)
-                for i, div_id in enumerate(site_ids[1:], 2):
-                    if args.verbose:
-                        print(f"\n  [{i}/{n_fetch}] {div_id}", end=" ", flush=True, file=_out)
-                    availability[div_id] = data_source.fetch_availability(
-                        park["facility_id"], div_id, args.start_date, permit_type=permit_type
+                all_zero = probe and not any(probe[d] > 0 for d in probe)
+
+                if all_zero:
+                    # Every target date is 0 — fully booked for this window.
+                    # Propagate to all capped sites; no further calls needed.
+                    for sid in site_ids:
+                        availability[sid] = probe
+                    saved = n_capped - 1
+                    print(
+                        f"done ({api_calls} call — all dates fully booked, {saved} calls saved)"
+                        f" [{time.perf_counter() - _fetch_t0:.1f}s]",
+                        file=_out,
                     )
-                print("done", file=_out)
+                    avail_status = "all_booked"
+                else:
+                    avail_status = "live"
+                    availability[site_ids[0]] = probe
+                    remaining_ids = site_ids[1:]
+                    print(f"done (1/{n_capped})", file=_out)
+                    if remaining_ids:
+                        print(f"Fetching remaining {len(remaining_ids)} sites...", end=" ", flush=True, file=_out)
+                        for i, div_id in enumerate(remaining_ids, 2):
+                            if args.verbose:
+                                print(f"\n  [{i}/{n_capped}] {div_id}", end=" ", flush=True, file=_out)
+                            raw = data_source.fetch_availability(
+                                park["facility_id"], div_id, args.start_date, permit_type=permit_type
+                            )
+                            api_calls += 1
+                            availability[div_id] = {d: v for d, v in raw.items() if d in target_dates}
+                        print(f"done [{time.perf_counter() - _fetch_t0:.1f}s]", file=_out)
+
+                    # Stats: calls made, districts queried, total available permit slots.
+                    if not json_mode:
+                        total_avail_slots = sum(
+                            cnt
+                            for site_avail in availability.values()
+                            for cnt in site_avail.values()
+                            if cnt > 0
+                        )
+                        n_dist_fetched = len(selected_districts)
+                        _console.print(
+                            f"[dim]  {api_calls} API call{'s' if api_calls != 1 else ''}"
+                            f" · {n_dist_fetched}/{n_districts_total} district{'s' if n_dist_fetched != 1 else ''} queried"
+                            f" · {total_avail_slots} available permit slot{'s' if total_avail_slots != 1 else ''}[/dim]"
+                        )
 
     # Step 3 — DFS to find all multi-night chains.
     min_nights = None if args.exact_length else 1
@@ -278,18 +458,21 @@ def _search_park(
             for i, chain in enumerate(chains, 1)
         ]
 
-    _console.print(f"\nFound [bold green]{len(chains)}[/bold green] chain(s) in [bold]{park['display_name']}[/bold].\n")
+    _console.print()
+    _print_avail_status_banner(avail_status, park["display_name"], len(chains))
+
+    display_chains = chains  # scoped by districts (--detail-limit) and chain count (--limit)
 
     show_overview = args.overview or (not args.chains)
     show_chains   = args.chains   or (not args.overview)
 
     if show_overview:
         if args.exact_length:
-            _print_flow_table(chains)
+            _print_flow_table(display_chains)
         else:
-            _print_grouped_flow_table(chains, args.nights)
+            _print_grouped_flow_table(display_chains, args.nights)
     if show_chains:
-        _print_chain_details(chains)
+        _print_chain_details(display_chains)
     return None
 
 
@@ -403,6 +586,53 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help="Cap the number of chains returned. Applied after all filters. Default: no limit.",
     )
+    parser.add_argument(
+        "--detail-limit",
+        type=int,
+        default=25,
+        metavar="N",
+        dest="detail_limit",
+        help=(
+            "Max number of site districts to query for availability (limits live API traffic). "
+            "Applied after --area filtering; only the first N remaining districts are fetched. "
+            "Use --limit to cap the number of chains in the output. Default: 25."
+        ),
+    )
+    parser.add_argument(
+        "--area",
+        nargs="+",
+        metavar="AREA",
+        default=None,
+        help=(
+            "Restrict search to sites in matching districts (case-insensitive substring match). "
+            "Accepts one or more names: --area 'Carbon River' 'Mowich'. "
+            "Reduces API calls by skipping all sites outside the named areas. "
+            "List available districts with --list-areas."
+        ),
+    )
+    parser.add_argument(
+        "--list-areas",
+        action="store_true",
+        default=False,
+        dest="list_areas",
+        help=(
+            "Print district names and site counts for the selected park(s). "
+            "Fast — fetches site list only, no availability API calls. "
+            "Combine with --live to use real site data."
+        ),
+    )
+    parser.add_argument(
+        "--list-chains",
+        action="store_true",
+        default=False,
+        dest="list_chains",
+        help=(
+            "Find and display multi-night permit chains with availability. "
+            "Requires --start-date and --nights. "
+            "Use --live for real-time data, --area to filter by district, "
+            "--limit to cap output."
+        ),
+    )
 
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
@@ -436,14 +666,19 @@ def _parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    # Validate required args when not just listing parks.
-    if not args.list_parks:
+    # Validate required args.
+    if args.list_parks:
+        pass  # no other args needed
+    elif getattr(args, "list_chains", False):
         if not args.park:
-            parser.error("--park is required (or use --list-parks to see options)")
+            parser.error("--park is required for --list-chains")
         if args.start_date is None:
-            parser.error("--start-date is required")
+            parser.error("--start-date is required for --list-chains")
         if args.nights is None:
-            parser.error("--nights is required")
+            parser.error("--nights is required for --list-chains")
+    elif getattr(args, "list_areas", False):
+        if not args.park:
+            parser.error("--park is required for --list-areas")
 
     return args
 
@@ -500,31 +735,85 @@ def _route_text(chain: Chain) -> Text:
     return t
 
 
-def _overview_table(chains: list[Chain], start_num: int = 1) -> Table:
-    """Minimal overview: numbered routes, entry green, exit cyan."""
+def _overview_table(chains: list[Chain], start_num: int = 1, show_header: bool = True) -> Table:
+    """
+    Numbered chain overview with route flow and area (district).
+
+    show_header=True  — use SIMPLE_HEAD box (header line separator).
+    show_header=False — no header row (used in grouped mode where group Rules act as labels).
+    """
     tbl = Table(
-        box=None,
-        show_header=False,
+        box=rich_box.SIMPLE_HEAD if show_header else None,
+        show_header=show_header,
+        header_style="bold dim",
         pad_edge=False,
         expand=False,
-        padding=(0, 1),
+        padding=(0, 2),
     )
     tbl.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
     tbl.add_column("Route")
+    tbl.add_column("Area", style="dim", min_width=20)
 
     for i, chain in enumerate(chains, start_num):
-        tbl.add_row(str(i), _route_text(chain))
+        # Collect unique districts in chain order, skipping blanks.
+        seen: dict[str, None] = {}
+        for link in chain.links:
+            d = (link.site.district or "").strip()
+            if d:
+                seen[d] = None
+        area_str = "  /  ".join(seen.keys()) if seen else "—"
+        tbl.add_row(str(i), _route_text(chain), area_str)
 
     return tbl
 
 
+def _print_avail_status_banner(avail_status: str, park_name: str, chain_count: int) -> None:
+    """Print a clear availability status line before the chain results."""
+    from rich.panel import Panel as _Panel
+
+    if avail_status == "all_booked":
+        _console.print(_Panel(
+            "[bold red]All permit dates are fully booked (0 remaining on every night).[/bold red]\n"
+            "[dim]Chains below show all physically possible routes — none are currently bookable.\n"
+            "Check back for cancellations or try different dates.[/dim]",
+            title="[bold red]Fully Booked[/bold red]",
+            border_style="red",
+            expand=False,
+        ))
+    elif avail_status == "pre_season":
+        _console.print(_Panel(
+            "[bold yellow]Reservations have not opened yet — the API returned no availability data.[/bold yellow]\n"
+            "[dim]Chains below show all physically possible routes for planning purposes.[/dim]",
+            title="[bold yellow]Pre-Season[/bold yellow]",
+            border_style="yellow",
+            expand=False,
+        ))
+    elif avail_status == "mock":
+        _console.print(
+            f"Found [bold green]{chain_count}[/bold green] chain(s) in [bold]{park_name}[/bold]."
+            f"  [dim](mock data)[/dim]"
+        )
+        return
+    else:
+        # live data with real availability
+        _console.print(
+            f"Found [bold green]{chain_count}[/bold green] chain(s) in [bold]{park_name}[/bold]."
+        )
+        return
+
+    _console.print(
+        f"\n[dim]{chain_count} possible route{'s' if chain_count != 1 else ''} for [bold]{park_name}[/bold]:[/dim]"
+    )
+
+
 def _print_flow_table(chains: list[Chain]) -> None:
-    """Flat overview for exact-length results."""
-    _console.print(_overview_table(chains))
+    """Flat overview for exact-length results (with column headers)."""
+    _console.print(_overview_table(chains, show_header=True))
 
 
 def _print_grouped_flow_table(chains: list[Chain], max_nights: int) -> None:
-    """Chains grouped by length (longest first), numbered continuously."""
+    """Chains grouped by length (longest first), numbered continuously.
+    Each group is headed by a Rule — no per-table headers needed."""
     counter = 1
     for nights_len, group in groupby(chains, key=lambda c: c.num_nights):
         group_list = list(group)
@@ -535,7 +824,7 @@ def _print_grouped_flow_table(chains: list[Chain], max_nights: int) -> None:
             f"  [dim]{start_d} → {end_d}  ·  {len(group_list)} chains[/dim]"
         )
         _console.print(Rule(label, style="yellow dim"))
-        _console.print(_overview_table(group_list, start_num=counter))
+        _console.print(_overview_table(group_list, start_num=counter, show_header=False))
         counter += len(group_list)
 
 
@@ -551,14 +840,15 @@ def _print_chain_details(chains: list[Chain]) -> None:
         ))
 
         tbl = Table(
-            box=rich_box.SIMPLE,
+            box=rich_box.SIMPLE_HEAD,
             show_header=True,
-            header_style="dim",
+            header_style="bold dim",
             pad_edge=True,
         )
         tbl.add_column("Night", justify="right", width=5)
         tbl.add_column("Date", width=12, style="dim")
-        tbl.add_column("Site", min_width=30)
+        tbl.add_column("Site", min_width=28)
+        tbl.add_column("Area", min_width=22, style="dim")
         tbl.add_column("Avail", justify="right", width=8)
 
         for j, link in enumerate(chain.links, 1):
@@ -575,10 +865,12 @@ def _print_chain_details(chains: list[Chain]) -> None:
                 night_str = Text(str(j))
                 site_text = Text(link.site.name)
 
+            area_str = (link.site.district or "").strip() or "—"
             tbl.add_row(
                 night_str,
                 str(link.night_date),
                 site_text,
+                area_str,
                 _avail_text(link.remaining),
             )
 

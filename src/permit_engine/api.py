@@ -72,7 +72,18 @@ _HEADERS = {
 }
 
 # Seconds to wait between rec.gov calls to avoid rate limiting.
-_RATE_LIMIT_SECONDS = 1.0
+_RATE_LIMIT_SECONDS = 0.5
+
+# In-process cache: (facility_id, division_id, month, year) -> availability dict.
+# Avoids repeat calls if the same site is queried more than once in a session.
+_availability_cache: dict[tuple, dict[str, int]] = {}
+
+# NOTE: No bulk availability endpoint exists for ITINERARY parks.
+# Confirmed via HAR capture of rec.gov's own frontend — the browser makes one
+# GET /api/permititinerary/{facility_id}/division/{div_id}/availability/month
+# call per division. There is no facility-level endpoint that returns all
+# divisions at once. The Enchantments (ZONE) endpoint is the only bulk option
+# and is specific to that permit system.
 
 
 def fetch_sites(facility_id: str) -> list[dict]:
@@ -98,27 +109,48 @@ def fetch_sites(facility_id: str) -> list[dict]:
 
     sites = []
     for div_id, div in divisions.items():
+        skip_reason = None
         if not div.get("is_active", True):
-            continue
-        if _is_group_site(div.get("name", "")):
-            continue
-        if _is_placeholder_site(div.get("name", "")):
-            continue
+            skip_reason = "inactive"
+        elif _is_placeholder_site(div.get("name", "")):
+            skip_reason = "placeholder"
+        elif _is_zone_parent(div.get("name", ""), div.get("district", "")):
+            skip_reason = "zone-parent"
+        elif div.get("is_accessible_as_child_only", False):
+            skip_reason = "child-only"
+        elif div.get("latitude", 0) == 0 or div.get("longitude", 0) == 0:
+            skip_reason = "no-coords"
+
         lat = div.get("latitude", 0)
         lon = div.get("longitude", 0)
-        if lat == 0 or lon == 0:
+        div_type = (div.get("type") or div.get("division_type") or "").strip()
+        district = div.get("district", "")
+
+        if _verbose:
+            _vlog(
+                f"  div {div_id:>15}  {div.get('name', '')!r:40}"
+                f"  district={district!r:30}  type={div_type!r:20}"
+                f"  active={div.get('is_active', True)!s:5}"
+                f"  lat={lat}  lon={lon}"
+                + (f"  SKIP({skip_reason})" if skip_reason else "  OK")
+            )
+
+        if skip_reason:
             continue
+
         sites.append({
             "division_id": div_id,
             "name": div["name"],
             "lat": float(lat),
             "lon": float(lon),
-            "district": div.get("district", ""),
+            "district": district,
+            "type": div_type,
         })
 
     _vlog(f"  raw divisions: {len(divisions)}, after filters: {len(sites)}")
-    for s in sites:
-        _vlog(f"    div {s['division_id']:>15}  {s['name']!r:40}  lat={s['lat']:.4f}  lon={s['lon']:.4f}")
+    if divisions:
+        sample_div = next(iter(divisions.values()))
+        _vlog(f"  division fields available: {sorted(sample_div.keys())}")
     return sites
 
 
@@ -139,7 +171,6 @@ def fetch_availability(
       "ITINERARY" — /api/permititinerary/{facility_id}/division/{div_id}/availability/month
                     Params: month=M&year=YYYY
                     Response: payload.quota_type_maps.ConstantQuotaUsageDaily (reservation counts)
-                              payload.bools (walk-up signal, used as fallback)
                     Used by: Rainier (4675317), Olympic (4098362), NC (4675322, assumed)
 
       "ZONE"      — /api/permitinyo/{facility_id}/availabilityv2
@@ -152,6 +183,11 @@ def fetch_availability(
         return _fetch_availability_zone(facility_id, division_id, start_date)
 
     # ITINERARY (and legacy QUOTA label): permititinerary endpoint, confirmed via HAR.
+    cache_key = (facility_id, division_id, start_date.month, start_date.year)
+    if cache_key in _availability_cache:
+        _vlog(f"  cache hit: {facility_id}/{division_id} {start_date.month}/{start_date.year}")
+        return _availability_cache[cache_key]
+
     url = (
         f"{_REC_GOV_BASE}/permititinerary/{facility_id}"
         f"/division/{division_id}/availability/month"
@@ -172,6 +208,13 @@ def fetch_availability(
     try:
         response = requests.get(url, headers=_HEADERS, params=params, timeout=30)
 
+        # Reconstruct the curl command
+        # .url already includes the encoded params for a GET request
+        curl_command = f"curl -X GET '{response.request.url}'"
+        for k, v in response.request.headers.items():
+            curl_command += f" -H '{k}: {v}'"
+
+        _vlog(f"  curl command : {curl_command}")
         _vlog(f"  status       : {response.status_code}")
         _vlog(f"  content-type : {response.headers.get('content-type', 'n/a')}")
         _vlog(f"  content-len  : {response.headers.get('content-length', len(response.content))} bytes")
@@ -196,9 +239,14 @@ def fetch_availability(
     payload = body.get("payload", {})
     _vlog(f"  payload keys : {list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__}")
 
-    # ── Primary: ConstantQuotaUsageDaily (reservation remaining counts) ──────
+    # ConstantQuotaUsageDaily[date].remaining — advance reservation slots left.
+    # remaining > 0 → bookable now on recreation.gov.
+    # remaining = 0 → fully reserved for that date.
+    # Empty dict   → pre-season, no reservation data exists yet.
+
     quota_maps = payload.get("quota_type_maps", {}) if isinstance(payload, dict) else {}
     daily = quota_maps.get("ConstantQuotaUsageDaily", {})
+
     _vlog(f"  quota_type_maps keys: {list(quota_maps.keys())}")
     _vlog(f"  ConstantQuotaUsageDaily dates: {len(daily)}")
     if daily:
@@ -208,23 +256,11 @@ def fetch_availability(
     if daily:
         result = {date_str: entry["remaining"] for date_str, entry in daily.items()}
         available = sum(1 for v in result.values() if v > 0)
-        _vlog(f"  → parsed from quota_maps: {len(result)} dates, {available} with remaining > 0")
+        _vlog(f"  → {len(result)} dates, {available} with remaining > 0")
+        _availability_cache[cache_key] = result
         return result
 
-    # ── Fallback: bools field (walk-up / open signal) ────────────────────────
-    bools = payload.get("bools", {}) if isinstance(payload, dict) else {}
-    _vlog(f"  bools dates  : {len(bools)}")
-    if bools:
-        sample_bools = dict(list(bools.items())[:3])
-        _vlog(f"  bools sample (first 3): {sample_bools}")
-        any_true = any(bools.values())
-        if any_true:
-            result = {date_str: (1 if val else 0) for date_str, val in bools.items()}
-            available = sum(1 for v in result.values() if v > 0)
-            _vlog(f"  → parsed from bools: {len(result)} dates, {available} available")
-            return result
-
-    _vlog(f"  → no quota_maps and no true bools — returning {{}} (pre-season / no data)")
+    _vlog(f"  → ConstantQuotaUsageDaily empty — pre-season, returning {{}}")
     return {}
 
 
@@ -387,6 +423,17 @@ def _is_placeholder_site(name: str) -> bool:
     not real backcountry sites and should not appear as graph nodes.
     """
     return "Other Accommodations" in name or "Placeholder" in name
+
+
+def _is_zone_parent(name: str, district: str) -> bool:
+    """
+    Zone/area parent nodes have the same name as their district.
+
+    rec.gov uses a parent division (name == district) as a container grouping
+    real campsites. This parent is not a bookable overnight stop and does not
+    appear on the website's availability grid — only its children do.
+    """
+    return bool(name and district and name.strip() == district.strip())
 
 
 def _stitch_ways_by_name(raw_ways: list[dict]) -> list[dict]:

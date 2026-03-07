@@ -48,6 +48,7 @@ _SITES = [
         "lat": 48.72839,
         "lon": -121.01404,
         "district": "East Bank Trail",
+        "type": "Campsite",
     },
     {
         "division_id": "4675322082",
@@ -55,6 +56,7 @@ _SITES = [
         "lat": 48.77136,
         "lon": -121.02096,
         "district": "East Bank Trail",
+        "type": "Campsite",
     },
     {
         "division_id": "4675322079",
@@ -62,6 +64,7 @@ _SITES = [
         "lat": 48.78686,
         "lon": -121.02873,
         "district": "East Bank Trail",
+        "type": "Campsite",
     },
     {
         "division_id": "4675322072",
@@ -69,6 +72,7 @@ _SITES = [
         "lat": 48.83771,
         "lon": -121.02015,
         "district": "East Bank Trail",
+        "type": "Campsite",
     },
     # CampE — on Nightmare Loop Trail (genuine mid-trail junction with East Bank)
     {
@@ -77,6 +81,7 @@ _SITES = [
         "lat": 48.93380,
         "lon": -120.98643,
         "district": "East Bank Trail",
+        "type": "Campsite",
     },
     # CampF — on Copper Ridge Trail (trailhead connection with East Bank)
     {
@@ -85,6 +90,7 @@ _SITES = [
         "lat": 48.71000,
         "lon": -121.04800,
         "district": "Copper-Chilliwack",
+        "type": "Campsite",
     },
 ]
 

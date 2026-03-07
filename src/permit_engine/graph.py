@@ -84,7 +84,15 @@ def build_graph(
     allow_trailhead : when True, also connect sites at shared trailhead nodes
                       (parking lots where separatere trails begin / end).
     """
-    sites = {s["division_id"]: Site(**s) for s in raw_sites}
+    _site_fields = {f.name for f in Site.__dataclass_fields__.values()}
+    # Group sites (shared campsites) are excluded from chain search — a solo/small-group
+    # backpacker cannot route through a group-reserved site. fetch_sites() already
+    # removes "(No Campfires)" group sites; here we remove remaining regular group sites.
+    sites = {
+        s["division_id"]: Site(**{k: v for k, v in s.items() if k in _site_fields})
+        for s in raw_sites
+        if "Group" not in s.get("name", "") and "group" not in s.get("name", "")
+    }
 
     # Use sets during construction to avoid duplicate edges, then convert to
     # sorted lists so the adjacency order is deterministic across runs.
