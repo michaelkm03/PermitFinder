@@ -1,0 +1,223 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+
+    {
+      "name": "wa-permits: list parks",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": ["--list-parks"],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: list areas (Olympic, mock)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "olympic",
+        "--list-areas"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: list areas (Olympic, live)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "olympic",
+        "--list-areas",
+        "--live"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: availability table (NC, mock)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "north-cascades",
+        "--list-availability",
+        "--start-date", "2026-07-15",
+        "--nights", "5"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: availability table (Olympic, live)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "olympic",
+        "--list-availability",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--live"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: availability table (Olympic, live, area filter)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "olympic",
+        "--list-availability",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--live",
+        "--area", "Staircase"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: availability table (all parks, mock)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "all",
+        "--list-availability",
+        "--start-date", "2026-07-15",
+        "--nights", "5"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: chains (Rainier, mock, 5 nights)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "rainier",
+        "--list-chains",
+        "--start-date", "2026-07-22",
+        "--nights", "5"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: chains (NC, mock, variable length)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "north-cascades",
+        "--list-chains",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--no-exact-length"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: chains (Olympic, live, 5 nights)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "olympic",
+        "--list-chains",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--live"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: chains (Olympic, live, area filter)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "olympic",
+        "--list-chains",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--live",
+        "--area", "Carbon River", "Mowich"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: chains (all parks, live, available only)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "all",
+        "--list-chains",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--live",
+        "--available",
+        "--permit-count", "2",
+        "--limit", "20"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: chains (all parks, live, JSON output)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "all",
+        "--list-chains",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--limit", "50",
+        "--json"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "wa-permits: chains (all parks, live, verbose)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "permit_engine.cli",
+      "args": [
+        "--park", "all",
+        "--list-chains",
+        "--start-date", "2026-07-15",
+        "--nights", "5",
+        "--live",
+        "--verbose"
+      ],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}

@@ -47,6 +47,12 @@ Usage examples
 
   # Variable-length chains (1 through 5 nights), grouped longest-first:
   wa-permits --park rainier --list-chains --start-date 2026-07-15 --nights 5 --no-exact-length
+
+  # Flat availability table (Facility / District / Division / remaining / date range):
+  wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5
+  wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5 --live
+  wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5 --live --area Hoh
+  wa-permits --park all    --list-availability --start-date 2026-07-15 --nights 5
 """
 from __future__ import annotations
 
@@ -179,11 +185,152 @@ def main() -> int:
             _console.print()
         return 0
 
+    # --list-availability: human-readable permit availability per division.
+    if getattr(args, "list_availability", False):
+        if not args.park:
+            print("--list-availability requires --park (or use --park all)", file=sys.stderr)
+            return 1
+
+        if args.live:
+            from permit_engine import api as _av_ds
+        else:
+            from permit_engine import mock as _av_ds  # type: ignore[assignment]
+
+        park_keys_av = list(PARKS.keys()) if "all" in (args.park or []) else (args.park or [])
+        end_date     = args.start_date + timedelta(days=args.nights - 1)
+        target_dates = sorted(
+            (args.start_date + timedelta(days=d)).strftime("%Y-%m-%d")
+            for d in range(args.nights)
+        )
+        # Short date labels for sparkline header: "Jul 15", "Jul 16", ...
+        date_labels = [
+            (args.start_date + timedelta(days=d)).strftime("%b %-d")
+            if sys.platform != "win32"
+            else (args.start_date + timedelta(days=d)).strftime("%b %#d")
+            for d in range(args.nights)
+        ]
+        source_note  = "live" if args.live else "mock data"
+
+        from rich.panel import Panel as _Panel
+
+        for pk in park_keys_av:
+            park_cfg    = PARKS[pk]
+            permit_type = park_cfg.get("permit_type", "ITINERARY")
+            raw_sites   = _av_ds.fetch_sites(park_cfg["facility_id"])
+
+            # Apply --area filter.
+            if args.area:
+                raw_sites = [
+                    s for s in raw_sites
+                    if any(f.lower() in (s.get("district") or "").lower() for f in args.area)
+                ]
+
+            # Fetch availability for every site.
+            avail_map: dict[str, list[int]] = {}
+            for s in raw_sites:
+                raw = _av_ds.fetch_availability(
+                    park_cfg["facility_id"],
+                    s["division_id"],
+                    args.start_date,
+                    permit_type=permit_type,
+                ) if args.live else _av_ds.fetch_availability(
+                    park_cfg["facility_id"],
+                    s["division_id"],
+                    args.start_date,
+                )
+                avail_map[s["division_id"]] = [raw.get(d, -1) for d in target_dates]
+
+            n_sites = len(raw_sites)
+            n_open_sites = sum(
+                1 for div_id, counts in avail_map.items()
+                if any(c > 0 for c in counts)
+            )
+
+            _console.print(_Panel(
+                f"[dim]{park_cfg['facility_id']}  ·  "
+                f"{args.start_date} → {end_date}  ({args.nights} nights)  ·  "
+                f"{n_sites} site{'s' if n_sites != 1 else ''}  ·  "
+                f"{n_open_sites} with availability  ·  {source_note}[/dim]",
+                title=f"[bold yellow]{park_cfg['display_name']} — Permit Availability[/bold yellow]",
+                expand=False,
+                border_style="yellow dim",
+            ))
+
+            # Build table: District | Division | [sparkline per night] | Min | Open
+            tbl = Table(
+                box=rich_box.SIMPLE_HEAD,
+                show_header=True,
+                header_style="bold dim",
+                pad_edge=True,
+                expand=False,
+                padding=(0, 1),
+            )
+            tbl.add_column("District",  min_width=20, style="dim")
+            tbl.add_column("Division",  min_width=26)
+            # One column per night (date label as header).
+            for lbl in date_labels:
+                tbl.add_column(lbl, justify="center", width=7, no_wrap=True)
+            tbl.add_column("Min",  justify="right", width=5)
+            tbl.add_column("Open", justify="right", width=6)
+
+            # Group rows by district.
+            sorted_sites = sorted(raw_sites, key=lambda x: ((x.get("district") or ""), x["name"]))
+            prev_district = None
+            for s in sorted_sites:
+                district = (s.get("district") or "—").strip() or "—"
+                counts   = avail_map[s["division_id"]]
+                known    = [c for c in counts if c >= 0]
+                min_av   = min(known) if known else -1
+                n_open   = sum(1 for c in known if c > 0)
+                n_total  = len(target_dates)
+
+                # Add a blank separator row between districts.
+                if prev_district is not None and district != prev_district:
+                    tbl.add_section()
+                prev_district = district
+
+                # Per-night cells.
+                night_cells: list[Text] = []
+                for c in counts:
+                    if c < 0:
+                        night_cells.append(Text("  ·  ", style="dim"))
+                    elif c == 0:
+                        night_cells.append(Text(" full", style="bold red"))
+                    elif c == 1:
+                        night_cells.append(Text(f"  1  ", style="bold yellow"))
+                    else:
+                        night_cells.append(Text(f"  {c}  ", style="bold green"))
+
+                # Min and Open summary cells.
+                if min_av < 0:
+                    min_cell  = Text("  —", style="dim")
+                    open_cell = Text("  —", style="dim")
+                elif min_av == 0:
+                    min_cell  = Text("  0", style="bold red")
+                    open_cell = Text(f"{n_open}/{n_total}", style="red" if n_open < n_total else "dim")
+                elif min_av == 1:
+                    min_cell  = Text("  1", style="bold yellow")
+                    open_cell = Text(f"{n_open}/{n_total}", style="yellow")
+                else:
+                    min_cell  = Text(f"  {min_av}", style="bold green")
+                    open_cell = Text(f"{n_open}/{n_total}", style="green")
+
+                tbl.add_row(district, s["name"], *night_cells, min_cell, open_cell)
+
+            _console.print(tbl)
+            _console.print(
+                "[dim]  Nightly columns show permits remaining. "
+                "Min = worst night. Open = nights with ≥ 1 remaining.[/dim]\n"
+            )
+
+        return 0
+
     # Without --list-chains, the chain search does not run.
     if not getattr(args, "list_chains", False):
         _console.print("\n[dim]Specify a command:[/dim]")
-        _console.print("  [bold]--list-areas[/bold]   [dim]District overview for a park (fast, no API availability fetch)[/dim]")
-        _console.print("  [bold]--list-chains[/bold]  [dim]Find multi-night permit chains with live or mock availability[/dim]")
+        _console.print("  [bold]--list-areas[/bold]         [dim]District overview for a park (fast, no availability fetch)[/dim]")
+        _console.print("  [bold]--list-availability[/bold]  [dim]Flat table: Facility / District / Division / remaining / dates[/dim]")
+        _console.print("  [bold]--list-chains[/bold]        [dim]Find multi-night permit chains with live or mock availability[/dim]")
         _console.print("\n[dim]Run wa-permits --help for full usage.[/dim]")
         return 0
 
@@ -633,6 +780,17 @@ def _parse_args() -> argparse.Namespace:
             "--limit to cap output."
         ),
     )
+    parser.add_argument(
+        "--list-availability",
+        action="store_true",
+        default=False,
+        dest="list_availability",
+        help=(
+            "Print a flat table of every division's availability for the requested "
+            "date window: Facility / District / Division / Min Avail / Nights Open / Date Range. "
+            "Requires --start-date and --nights. Combine with --live and --area."
+        ),
+    )
 
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
@@ -676,6 +834,13 @@ def _parse_args() -> argparse.Namespace:
             parser.error("--start-date is required for --list-chains")
         if args.nights is None:
             parser.error("--nights is required for --list-chains")
+    elif getattr(args, "list_availability", False):
+        if not args.park:
+            parser.error("--park is required for --list-availability")
+        if args.start_date is None:
+            parser.error("--start-date is required for --list-availability")
+        if args.nights is None:
+            parser.error("--nights is required for --list-availability")
     elif getattr(args, "list_areas", False):
         if not args.park:
             parser.error("--park is required for --list-areas")
