@@ -1,176 +1,248 @@
-# PermitFinder — SE Contribution Plan
-
-This document tracks planned contributions to demonstrate software engineering
-ability across testing, type safety, CI/CD, and code quality.
-
----
-
-## Required (Must-Do — Core SE Signal)
-
-### 1. Add GitHub Actions CI Pipeline
-**File:** `.github/workflows/ci.yml` *(create)*
-
-No automated test run exists on any push or PR. This turns the repo from
-"code that exists" into "maintained software" in any reviewer's eyes.
-
-**Tasks:**
-- [ ] Create workflow triggered on `push` and `pull_request` to `main`
-- [ ] Step: checkout code
-- [ ] Step: set up Python 3.10
-- [ ] Step: `pip install -e ".[dev]"`
-- [ ] Step: `pytest --cov=permit_engine --cov-fail-under=80`
-- [ ] Step: publish coverage report as workflow artifact
-- [ ] (Optional) Add a coverage badge to README
-
-```yaml
-# .github/workflows/ci.yml skeleton
-name: CI
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov=permit_engine --cov-fail-under=80
-```
+# PermitFinder — Product & Engineering Backlog
+**Version:** 1.0
+**Status:** Approved
+**Product Owner:** Michael Montgomery
+**Engineering Lead:** Michael Montgomery
+**Last Updated:** 2026-03-17
 
 ---
 
-### 2. Add Type Annotations to `api.py` and `cli.py`
+## Sign-Off
+
+| Role | Name | Date |
+|------|------|------|
+| Product Owner | Michael Montgomery | 2026-03-17 |
+| Engineering Lead | Michael Montgomery | 2026-03-17 |
+
+> Stories in **Sprint 1** are approved and scheduled. Stories in the **Backlog**
+> are approved by product and engineering but not yet assigned to a sprint.
+> All feature stories have been reviewed for technical feasibility by the
+> engineering lead.
+
+---
+
+## Story Point Scale
+
+| Points | Effort |
+|--------|--------|
+| 1 | Trivial — under 1 hour |
+| 2 | Small — half a day |
+| 3 | Medium — 1 day |
+| 5 | Large — 2–3 days |
+| 8 | X-Large — 1 week |
+
+---
+
+## Sprint 1 — Search & Availability Expansion
+**Sprint Goal:** Expand permit search to support multi-park queries and
+availability alerts, addressing the two most common user requests from beta.
+
+---
+
+### PF-101 · Availability Alerts — Notify When a Permit Opens Up
+**Epic:** Notifications
+**Type:** Feature
+**Points:** 5
+**Priority:** P0
+
+**Product Request:**
+> "The most common feedback we get is 'I found a route I want but there were no
+> permits available.' Users need to set an alert and get notified when a slot
+> opens up — checking manually every day is not a viable workflow."
+> — Product, 2026-03-10
+
+**Background:**
+Users should be able to register an alert for a specific park, date range, and
+trip duration. The engine periodically polls Recreation.gov availability for
+matching chains and triggers a notification when one becomes available. Initial
+delivery is CLI output or a log entry; a real notification channel (email/SMS)
+is out of scope for this story.
+
+**Acceptance Criteria:**
+- [ ] `wa-permits --watch` accepts `--park`, `--nights`, `--from`, `--to` and polls on a configurable interval (default 15 min)
+- [ ] When a matching chain is found that was not present in the previous poll, the result is printed and marked as new
+- [ ] The watch loop handles Recreation.gov rate limit responses (HTTP 429) gracefully with exponential backoff
+- [ ] `--watch` exits cleanly on `Ctrl+C` with a summary of how many alerts fired
+
 **Files:**
-- `src/permit_engine/api.py`
-- `src/permit_engine/cli.py`
-
-These are the two largest files with the most complex return shapes and have
-zero type hints. Standard Python SE practice in 2025 is to type-annotate all
-public function signatures and use `TypedDict` for complex dict return shapes.
-
-**Tasks:**
-- [ ] Define `TypedDict` classes for the Recreation.gov and OSM API response
-  shapes (Site dict, Availability dict, Trail dict)
-- [ ] Add return type annotations to all functions in `api.py`
-- [ ] Add parameter and return type annotations to all functions in `cli.py`
-- [ ] Add `mypy` as a dev dependency in `pyproject.toml`
-- [ ] Run `mypy src/` and fix all reported errors
-- [ ] Add `mypy` step to the CI pipeline (after #1)
+`src/permit_engine/cli.py`, `src/permit_engine/search.py`
 
 ---
 
-### 3. Remove Dead Code — `_is_group_site()`
-**File:** `src/permit_engine/api.py`
+### PF-102 · Multi-Park Search
+**Epic:** Search
+**Type:** Feature
+**Points:** 3
+**Priority:** P0
 
-`_is_group_site()` is defined but never called anywhere in the codebase.
-Dead code in a portfolio project signals inattention to detail.
+**Product Request:**
+> "A lot of users are flexible on which park they go to — they just want permits
+> for a given date range. Right now they have to run three separate searches.
+> Let them search across all supported parks in one command."
+> — Product, 2026-03-08
 
-**Tasks:**
-- [ ] Search all files to confirm it is truly unused: `grep -r "_is_group_site" src/`
-- [ ] Delete the function
-- [ ] Run the full test suite to confirm nothing broke
+**Background:**
+`--list-chains` currently requires a single `--park` argument. This story adds
+a `--all-parks` flag that runs the chain search across every park in the
+supported parks config and merges the results into a single ranked output.
 
----
+**Acceptance Criteria:**
+- [ ] `wa-permits --list-chains --all-parks --nights 4` returns chains from all supported parks
+- [ ] Results are sorted by `min_remaining` availability descending so the most bookable chains appear first
+- [ ] Each result row includes a `park` column so the user knows which park the chain belongs to
+- [ ] `--all-parks` and `--park` are mutually exclusive; using both returns a clear error
 
-### 4. Write Tests for the ZONE Code Path (Enchantments)
 **Files:**
-- `src/permit_engine/mock.py` — add ZONE-type mock data
-- `tests/test_search.py` or `tests/test_mock.py` — add ZONE tests
-
-The Enchantments / ZONE availability endpoint is fully implemented in `api.py`
-but has zero test coverage. The mock data only covers North Cascades (ITINERARY
-type). Adding ZONE coverage closes a real correctness gap.
-
-**Tasks:**
-- [ ] Extend `mock.py` to include a ZONE-type park with synthetic site and
-  availability data that mirrors the live API response shape
-- [ ] Write tests in `tests/test_mock.py` asserting ZONE mock data shape is valid
-- [ ] Write a test in `tests/test_search.py` that runs `find_chains()` against
-  ZONE-type data and asserts correct results
-- [ ] Confirm `filter_by_availability()` works correctly with ZONE availability counts
+`src/permit_engine/cli.py`, `src/permit_engine/api.py`
 
 ---
 
-## Nice to Have (Differentiators)
+### PF-103 · JSON Output for All Commands
+**Epic:** Integrations
+**Type:** Feature
+**Points:** 2
+**Priority:** P1
 
-### 5. Add Coverage Badge to README
-**Files:** `README.md`, `pyproject.toml`
+**Product Request:**
+> "Power users want to pipe PermitFinder output into their own scripts and
+> dashboards. The current Rich table output is not machine-readable. We need
+> a `--json` flag on every command."
+> — Product, 2026-03-09
 
-A coverage badge is a visible, immediate quality signal to any engineer or
-recruiter looking at the repo.
+**Background:**
+`--list-chains` already supports JSON output via `chains.json`. This story
+standardises `--json` as a flag across all CLI commands — `--list-parks`,
+`--list-areas`, and `--list-availability` — returning structured output
+instead of Rich-formatted tables.
 
-**Tasks:**
-- [ ] Add coverage configuration to `pyproject.toml`:
-  ```toml
-  [tool.coverage.run]
-  source = ["permit_engine"]
-  [tool.coverage.report]
-  fail_under = 80
-  ```
-- [ ] Use `coverage-badge` or GitHub Actions + shields.io to generate badge
-- [ ] Embed badge in README next to existing build status badge (once CI is up)
+**Acceptance Criteria:**
+- [ ] `--json` flag is supported on all four CLI commands
+- [ ] JSON output is valid, pretty-printed, and written to stdout
+- [ ] Rich table rendering is fully suppressed when `--json` is active
+- [ ] `--json` and `--output <file>` can be combined to write JSON to a file
 
----
-
-### 6. Enable `mypy` Strict Mode
-**Files:** `pyproject.toml`, all source files
-
-After completing the basic type annotations in Required #2, push further with
-`--strict` mode. This catches missing return types, untyped function parameters,
-and implicit `Any` usage.
-
-**Tasks:**
-- [ ] Add `mypy` strict config to `pyproject.toml`:
-  ```toml
-  [tool.mypy]
-  strict = true
-  ```
-- [ ] Run `mypy --strict src/` and fix all reported errors
-- [ ] Update CI pipeline to run mypy in strict mode
+**Files:**
+`src/permit_engine/cli.py`
 
 ---
 
-### 7. Add `requirements.txt`
-**File:** `requirements.txt` *(create)*
-
-Many engineers and employers default to looking for `requirements.txt`. It can
-be auto-generated from `pyproject.toml` using `pip-tools`.
-
-**Tasks:**
-- [ ] Install `pip-tools`: `pip install pip-tools`
-- [ ] Run `pip-compile pyproject.toml -o requirements.txt`
-- [ ] Commit `requirements.txt`
-- [ ] Add a note to README that `pyproject.toml` is the source of truth and
-  `requirements.txt` is auto-generated
+## Platform Sprint 1 — Engineering
+**Sprint Goal:** Establish CI and address the two code quality gaps that affect
+reliability of the live data path.
+> These are internal engineering tasks. They are not user-facing but are
+> required for the team to ship features reliably.
 
 ---
 
-### 8. Add Structured Logging
-**File:** `src/permit_engine/api.py`
+### PF-110 · CI Pipeline (GitHub Actions)
+**Epic:** Platform
+**Type:** Engineering
+**Points:** 2
+**Priority:** P0
 
-The current `_vlog()` / `_verbose` flag provides debug output but is not
-structured, has no log levels, and is not configurable for CI or production use.
-Replace it with Python's standard `logging` module.
+**Acceptance Criteria:**
+- [ ] Workflow triggers on `push` and `pull_request` to `main`
+- [ ] Pipeline installs dependencies and runs `pytest --cov=permit_engine --cov-fail-under=80`
+- [ ] A failing check causes the pipeline to report failure
+- [ ] README displays CI status badge
 
-**Tasks:**
-- [ ] Replace `_vlog()` calls with `logging.getLogger(__name__).debug()`
-- [ ] Replace any warning-level output with `logger.warning()`
-- [ ] Remove the `_verbose` module-level flag
-- [ ] Configure log level via CLI `--verbose` flag using `logging.basicConfig`
-- [ ] Add logging config to `cli.py` entry point
+**Files:** `.github/workflows/ci.yml` *(new)*
 
 ---
 
-## Summary Checklist
+### PF-111 · Add Type Annotations and mypy
+**Epic:** Platform
+**Type:** Engineering
+**Points:** 3
+**Priority:** P1
 
-| # | Task | Type | Status |
-|---|------|------|--------|
-| 1 | Add GitHub Actions CI pipeline | Required | [ ] |
-| 2 | Add type annotations + mypy to `api.py` and `cli.py` | Required | [ ] |
-| 3 | Remove dead `_is_group_site()` function | Required | [ ] |
-| 4 | Write ZONE code path tests + mock data | Required | [ ] |
-| 5 | Add coverage badge to README | Nice to Have | [ ] |
-| 6 | Enable mypy strict mode | Nice to Have | [ ] |
-| 7 | Add `requirements.txt` | Nice to Have | [ ] |
-| 8 | Add structured logging | Nice to Have | [ ] |
+**Background:**
+`api.py` and `cli.py` have zero type annotations despite having complex return
+shapes. `TypedDict` definitions are needed for the Recreation.gov and OSM
+response structures. `mypy` is added as a dev dependency and run in CI.
+
+**Acceptance Criteria:**
+- [ ] `TypedDict` classes defined for Site, Availability, and Trail response shapes
+- [ ] All public functions in `api.py` and `cli.py` have parameter and return type annotations
+- [ ] `mypy src/` passes with no errors
+- [ ] `mypy` runs as a CI step
+
+---
+
+### PF-112 · Remove Dead Code — `_is_group_site()`
+**Epic:** Platform
+**Type:** Engineering
+**Points:** 1
+**Priority:** P1
+
+**Acceptance Criteria:**
+- [ ] `_is_group_site()` is deleted from `api.py`
+- [ ] No references to it exist anywhere in the codebase
+
+**Files:** `src/permit_engine/api.py`
+
+---
+
+## Backlog — Approved, Not Yet Scheduled
+
+---
+
+### PF-201 · Saved Searches
+**Epic:** Search
+**Type:** Feature
+**Points:** 5
+
+**Product Request:**
+> "Users run the same search every weekend morning. Let them save a search
+> configuration by name and re-run it with a single command rather than
+> typing out all the flags every time."
+
+**Acceptance Criteria:**
+- [ ] `wa-permits --save-search <name>` saves the current flag combination to a local config file (`~/.wa-permits/searches.json`)
+- [ ] `wa-permits --run-search <name>` re-executes a saved search with its stored parameters
+- [ ] `wa-permits --list-searches` displays all saved searches with their parameters
+- [ ] `wa-permits --delete-search <name>` removes a saved search
+- [ ] Saving a search with an existing name prompts the user to confirm overwrite
+
+---
+
+### PF-202 · Trip Export — iCal and Plain Text
+**Epic:** Trip Planning
+**Type:** Feature
+**Points:** 3
+
+**Product Request:**
+> "Once a user finds a permit chain they want, they need to go book it. Right
+> now they're copying site names out of a terminal table. Let them export the
+> chain as an iCal file or a formatted plain-text itinerary they can print."
+
+**Acceptance Criteria:**
+- [ ] `wa-permits --list-chains --export ical` generates a `.ics` file with one event per night, titled with the campsite name and location
+- [ ] `wa-permits --list-chains --export text` generates a formatted plain-text itinerary with dates, site names, and permit details
+- [ ] Export targets the first result by default; `--chain-index <n>` selects a specific result
+- [ ] The exported file is written to the current directory and the path is printed to stdout
+
+---
+
+### PF-203 · Enchantments (ZONE) Full Support
+**Epic:** Search
+**Type:** Feature
+**Points:** 5
+
+**Product Request:**
+> "The Enchantments is the most sought-after permit in Washington and we don't
+> support it properly. ZONE permits work differently from ITINERARY permits —
+> we need full support including correct availability display and chain search."
+
+**Background:**
+The ZONE availability endpoint is partially implemented in `api.py` but the
+mock data, graph construction, and CLI display have not been validated against
+the ZONE response shape. This story completes the Enchantments integration end
+to end.
+
+**Acceptance Criteria:**
+- [ ] `--park enchantments` returns correct availability data from the ZONE endpoint
+- [ ] Zone-type availability counts are displayed correctly in `--list-availability` output
+- [ ] `--list-chains` correctly constructs and returns permit chains for ZONE-type parks
+- [ ] Mock data for the Enchantments is added to `mock.py` mirroring the live ZONE response shape
+- [ ] The Enchantments appears in `--list-parks` output with its correct permit type labeled as `ZONE`
