@@ -21,6 +21,31 @@
 
 ---
 
+## Table of Contents
+
+### Sprint 1 — Features
+| Ticket | Feature | Points | Priority |
+|--------|---------|--------|----------|
+| [PF-101](#pf-101--availability-alerts--notify-when-a-permit-opens-up) | Availability Alerts — poll Recreation.gov and notify when a permit chain opens up | 5 | P0 |
+| [PF-102](#pf-102--multi-park-search) | Multi-Park Search — run a single search across all supported parks at once | 3 | P0 |
+| [PF-103](#pf-103--json-output-for-all-commands) | JSON Output — machine-readable output flag for all CLI commands | 2 | P1 |
+
+### Sprint 1 — Engineering
+| Ticket | Task | Points | Priority |
+|--------|------|--------|----------|
+| [PF-110](#pf-110--ci-pipeline-github-actions) | CI Pipeline — GitHub Actions build and test on every push | 2 | P0 |
+| [PF-111](#pf-111--add-type-annotations-and-mypy) | Type Annotations & mypy — annotate api.py and cli.py; add mypy to CI | 3 | P1 |
+| [PF-112](#pf-112--remove-dead-code--_is_group_site) | Remove Dead Code — delete unused `_is_group_site()` from api.py | 1 | P1 |
+
+### Backlog — Features
+| Ticket | Feature | Points |
+|--------|---------|--------|
+| [PF-201](#pf-201--saved-searches) | Saved Searches — save and re-run named search configurations locally | 5 |
+| [PF-202](#pf-202--trip-export--ical-and-plain-text) | Trip Export — export a permit chain as an iCal file or plain-text itinerary | 3 |
+| [PF-203](#pf-203--enchantments-zone-full-support) | Enchantments ZONE Support — complete end-to-end support for ZONE-type permits | 5 |
+
+---
+
 ## Story Point Scale
 
 | Points | Effort |
