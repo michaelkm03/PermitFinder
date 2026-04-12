@@ -73,7 +73,11 @@ wa-permits --park olympic --list-areas --live   # use real site data
 
 ### `--list-availability`
 
-Flat table of every division's per-night availability: District / Division / nightly counts / Min / Open nights.
+Flat table of every campsite's per-night permit counts: District / Division / one column per night. Above the table, a summary line breaks down the full site count:
+
+- **N fully open** — every night in the window has at least 1 permit remaining; bookable on any night
+- **N partial** — some nights open, some fully booked; useful depending on which specific nights you need
+- **N fully booked** — every night is at 0 remaining; dead ends for these dates
 
 ```bash
 wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5
@@ -239,7 +243,7 @@ Run `--list-availability` for the full date window you care about. This gives yo
 wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 7 --live
 ```
 
-The "Min" column shows the worst night for each site. The "Open" column shows how many of your target nights still have at least one permit. Use this to quickly identify which sites are consistently available vs. fully booked.
+Above the table a summary line shows: **N fully open** (bookable every night), **N partial** (some nights available), **N fully booked** (no availability at all). Use this to quickly gauge how competitive the window is before drilling into individual sites.
 
 **Step 2 — Focus on the district where your existing bookings are**
 
