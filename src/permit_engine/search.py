@@ -20,10 +20,14 @@ With --available    : only chains where every site has remaining >= permit_count
 """
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 
 from permit_engine.graph import Site, TrailGraph
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -88,6 +92,10 @@ def find_chains(
     effective_min = min_nights if min_nights is not None else nights
     all_chains: list[Chain] = []
 
+    t0 = time.perf_counter()
+    log.debug("find_chains  %d start nodes, nights=%d, min_nights=%s, start_date=%s",
+              len(graph.sites), nights, effective_min, start_date)
+
     for start_site_id in graph.sites:
         visited: set[str] = {start_site_id}
         links: list[ChainLink] = [
@@ -110,6 +118,8 @@ def find_chains(
 
     if min_nights is not None:
         all_chains.sort(key=lambda c: -c.num_nights)
+
+    log.debug("find_chains  done: %d chains found  (%.3fs)", len(all_chains), time.perf_counter() - t0)
     return all_chains
 
 
@@ -119,7 +129,10 @@ def filter_by_availability(chains: list[Chain], permit_count: int) -> list[Chain
 
     Applied when --available is passed on the CLI.
     """
-    return [c for c in chains if c.meets_permit_count(permit_count)]
+    result = [c for c in chains if c.meets_permit_count(permit_count)]
+    log.debug("filter_by_availability  permit_count=%d  %d → %d chains",
+              permit_count, len(chains), len(result))
+    return result
 
 
 # ---------------------------------------------------------------------------

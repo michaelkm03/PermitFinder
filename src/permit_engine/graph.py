@@ -44,11 +44,15 @@ onto it. This tolerates minor GPS imprecision in the rec.gov coordinates.
 """
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import combinations
 
 from shapely.geometry import LineString, Point
+
+log = logging.getLogger(__name__)
 
 # ~200 m expressed in degrees at Washington State latitudes.
 _SNAP_THRESHOLD_DEGREES = 0.002
@@ -84,6 +88,10 @@ def build_graph(
     allow_trailhead : when True, also connect sites at shared trailhead nodes
                       (parking lots where separatere trails begin / end).
     """
+    t0 = time.perf_counter()
+    log.debug("build_graph  %d raw sites, %d trails, allow_trailhead=%s",
+              len(raw_sites), len(raw_trails), allow_trailhead)
+
     _site_fields = {f.name for f in Site.__dataclass_fields__.values()}
     # Group sites (shared campsites) are excluded from chain search — a solo/small-group
     # backpacker cannot route through a group-reserved site. fetch_sites() already
@@ -93,17 +101,31 @@ def build_graph(
         for s in raw_sites
         if "Group" not in s.get("name", "") and "group" not in s.get("name", "")
     }
+    log.debug("build_graph  group-site filter: %d → %d nodes (%d removed)",
+              len(raw_sites), len(sites), len(raw_sites) - len(sites))
 
     # Use sets during construction to avoid duplicate edges, then convert to
     # sorted lists so the adjacency order is deterministic across runs.
     adjacency: dict[str, set[str]] = {div_id: set() for div_id in sites}
 
     # Step 1 — within-trail edges (always valid).
+    t1 = time.perf_counter()
     for raw_trail in raw_trails:
         _add_within_trail_edges(raw_trail, sites, adjacency)
+    within_edges = sum(len(v) for v in adjacency.values()) // 2
+    log.debug("build_graph  within-trail edges: %d edges from %d trails  (%.3fs)",
+              within_edges, len(raw_trails), time.perf_counter() - t1)
 
     # Step 2 — cross-trail edges at shared OSM nodes (trailhead flag applies).
+    t2 = time.perf_counter()
     _add_cross_trail_edges(raw_trails, sites, adjacency, allow_trailhead)
+    total_edges = sum(len(v) for v in adjacency.values()) // 2
+    log.debug("build_graph  cross-trail edges: %d edges added  (%.3fs)",
+              total_edges - within_edges, time.perf_counter() - t2)
+
+    isolated = sum(1 for v in adjacency.values() if not v)
+    log.debug("build_graph  done: %d nodes, %d edges, %d isolated  (%.3fs total)",
+              len(sites), total_edges, isolated, time.perf_counter() - t0)
 
     return TrailGraph(
         sites=sites,

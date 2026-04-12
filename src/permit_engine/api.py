@@ -25,28 +25,14 @@ so the rest of the system works identically in both modes.
 """
 from __future__ import annotations
 
-import sys
+import logging
 import time
 from collections import defaultdict
 from datetime import date
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Verbose logging
-# ---------------------------------------------------------------------------
-
-_verbose = False
-
-
-def set_verbose(flag: bool) -> None:
-    global _verbose
-    _verbose = flag
-
-
-def _vlog(*args: object) -> None:
-    if _verbose:
-        print("[verbose]", *args, file=sys.stderr)
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -96,13 +82,13 @@ def fetch_sites(facility_id: str) -> list[dict]:
     Source: GET /api/permitcontent/{facility_id}
     """
     url = f"{_REC_GOV_BASE}/permitcontent/{facility_id}"
-    _vlog(f"")
-    _vlog(f"── fetch_sites ─────────────────────────────────────────────────")
-    _vlog(f"  facility_id  : {facility_id}")
-    _vlog(f"  GET {url}")
+    log.debug("fetch_sites  facility=%s  GET %s", facility_id, url)
+    t0 = time.perf_counter()
     response = requests.get(url, headers=_HEADERS, timeout=30)
-    _vlog(f"  status       : {response.status_code}")
-    _vlog(f"  content-len  : {response.headers.get('content-length', len(response.content))} bytes")
+    log.debug("fetch_sites  status=%d  size=%s bytes  elapsed=%.3fs",
+              response.status_code,
+              response.headers.get("content-length", len(response.content)),
+              time.perf_counter() - t0)
     response.raise_for_status()
 
     divisions = response.json()["payload"]["divisions"]
@@ -126,14 +112,9 @@ def fetch_sites(facility_id: str) -> list[dict]:
         div_type = (div.get("type") or div.get("division_type") or "").strip()
         district = div.get("district", "")
 
-        if _verbose:
-            _vlog(
-                f"  div {div_id:>15}  {div.get('name', '')!r:40}"
-                f"  district={district!r:30}  type={div_type!r:20}"
-                f"  active={div.get('is_active', True)!s:5}"
-                f"  lat={lat}  lon={lon}"
-                + (f"  SKIP({skip_reason})" if skip_reason else "  OK")
-            )
+        log.debug("  div %-20s  %-40s  district=%-25s  %s",
+                  div_id, repr(div.get("name", "")), repr(district),
+                  f"SKIP({skip_reason})" if skip_reason else "OK")
 
         if skip_reason:
             continue
@@ -147,10 +128,7 @@ def fetch_sites(facility_id: str) -> list[dict]:
             "type": div_type,
         })
 
-    _vlog(f"  raw divisions: {len(divisions)}, after filters: {len(sites)}")
-    if divisions:
-        sample_div = next(iter(divisions.values()))
-        _vlog(f"  division fields available: {sorted(sample_div.keys())}")
+    log.debug("fetch_sites  %d raw divisions → %d sites after filters", len(divisions), len(sites))
     return sites
 
 
@@ -185,7 +163,8 @@ def fetch_availability(
     # ITINERARY (and legacy QUOTA label): permititinerary endpoint, confirmed via HAR.
     cache_key = (facility_id, division_id, start_date.month, start_date.year)
     if cache_key in _availability_cache:
-        _vlog(f"  cache hit: {facility_id}/{division_id} {start_date.month}/{start_date.year}")
+        log.debug("fetch_availability  cache hit  division=%s  %d/%d",
+                  division_id, start_date.month, start_date.year)
         return _availability_cache[cache_key]
 
     url = (
@@ -196,71 +175,51 @@ def fetch_availability(
 
     time.sleep(_RATE_LIMIT_SECONDS)
 
-    _vlog(f"")
-    _vlog(f"── fetch_availability ──────────────────────────────────────────")
-    _vlog(f"  facility_id  : {facility_id}")
-    _vlog(f"  division_id  : {division_id}")
-    _vlog(f"  permit_type  : {permit_type}")
-    _vlog(f"  month/year   : {start_date.month}/{start_date.year}")
-    _vlog(f"  GET {url}")
-    _vlog(f"  params       : {params}")
+    log.debug("fetch_availability  division=%s  type=%s  %d/%d  GET %s",
+              division_id, permit_type, start_date.month, start_date.year, url)
+    t0 = time.perf_counter()
 
     try:
         response = requests.get(url, headers=_HEADERS, params=params, timeout=30)
-
-        # Reconstruct the curl command
-        # .url already includes the encoded params for a GET request
-        curl_command = f"curl -X GET '{response.request.url}'"
-        for k, v in response.request.headers.items():
-            curl_command += f" -H '{k}: {v}'"
-
-        _vlog(f"  curl command : {curl_command}")
-        _vlog(f"  status       : {response.status_code}")
-        _vlog(f"  content-type : {response.headers.get('content-type', 'n/a')}")
-        _vlog(f"  content-len  : {response.headers.get('content-length', len(response.content))} bytes")
+        elapsed = time.perf_counter() - t0
+        log.debug("fetch_availability  status=%d  size=%s bytes  elapsed=%.3fs",
+                  response.status_code,
+                  response.headers.get("content-length", len(response.content)),
+                  elapsed)
 
         if response.status_code >= 400:
-            _vlog(f"  body (400+)  : {response.text[:400]}")
-            _vlog(f"  → HTTP {response.status_code} — pre-season or wrong endpoint, returning {{}}")
+            log.debug("fetch_availability  HTTP %d — pre-season or wrong endpoint, returning {}",
+                      response.status_code)
             return {}
         response.raise_for_status()
 
     except requests.exceptions.RequestException as exc:
-        _vlog(f"  request error: {exc}")
+        log.debug("fetch_availability  request error: %s", exc)
         return {}
 
     try:
         body = response.json()
     except Exception as exc:
-        _vlog(f"  JSON parse error: {exc}")
-        _vlog(f"  raw body[:200]: {response.text[:200]}")
+        log.debug("fetch_availability  JSON parse error: %s", exc)
         return {}
 
     payload = body.get("payload", {})
-    _vlog(f"  payload keys : {list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__}")
 
     # ConstantQuotaUsageDaily[date].remaining — advance reservation slots left.
     # remaining > 0 → bookable now on recreation.gov.
     # remaining = 0 → fully reserved for that date.
     # Empty dict   → pre-season, no reservation data exists yet.
-
     quota_maps = payload.get("quota_type_maps", {}) if isinstance(payload, dict) else {}
     daily = quota_maps.get("ConstantQuotaUsageDaily", {})
-
-    _vlog(f"  quota_type_maps keys: {list(quota_maps.keys())}")
-    _vlog(f"  ConstantQuotaUsageDaily dates: {len(daily)}")
-    if daily:
-        sample = dict(list(daily.items())[:3])
-        _vlog(f"  sample (first 3): {sample}")
 
     if daily:
         result = {date_str: entry["remaining"] for date_str, entry in daily.items()}
         available = sum(1 for v in result.values() if v > 0)
-        _vlog(f"  → {len(result)} dates, {available} with remaining > 0")
+        log.debug("fetch_availability  %d dates returned, %d with remaining > 0", len(result), available)
         _availability_cache[cache_key] = result
         return result
 
-    _vlog(f"  → ConstantQuotaUsageDaily empty — pre-season, returning {{}}")
+    log.debug("fetch_availability  ConstantQuotaUsageDaily empty — pre-season, returning {}")
     return {}
 
 
@@ -296,36 +255,34 @@ def _fetch_availability_zone(
 
     time.sleep(_RATE_LIMIT_SECONDS)
 
-    _vlog(f"")
-    _vlog(f"── fetch_availability (ZONE) ────────────────────────────────────")
-    _vlog(f"  facility_id  : {facility_id}")
-    _vlog(f"  division_id  : {division_id}")
-    _vlog(f"  month/year   : {month}/{year}")
-    _vlog(f"  GET {url}")
-    _vlog(f"  params       : {params}")
+    log.debug("fetch_availability (ZONE)  facility=%s  division=%s  %d/%d  GET %s",
+              facility_id, division_id, month, year, url)
+    t0 = time.perf_counter()
 
     try:
         response = requests.get(url, headers=_HEADERS, params=params, timeout=30)
-        _vlog(f"  status       : {response.status_code}")
-        _vlog(f"  content-type : {response.headers.get('content-type', 'n/a')}")
-        _vlog(f"  content-len  : {response.headers.get('content-length', len(response.content))} bytes")
+        elapsed = time.perf_counter() - t0
+        log.debug("fetch_availability (ZONE)  status=%d  size=%s bytes  elapsed=%.3fs",
+                  response.status_code,
+                  response.headers.get("content-length", len(response.content)),
+                  elapsed)
         if response.status_code >= 400:
-            _vlog(f"  body (400+)  : {response.text[:400]}")
-            _vlog(f"  → HTTP {response.status_code} — pre-season or wrong endpoint, returning {{}}")
+            log.debug("fetch_availability (ZONE)  HTTP %d — pre-season or wrong endpoint, returning {}",
+                      response.status_code)
             return {}
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
-        _vlog(f"  request error: {exc}")
+        log.debug("fetch_availability (ZONE)  request error: %s", exc)
         return {}
 
     try:
         body = response.json()
     except Exception as exc:
-        _vlog(f"  JSON parse error: {exc}")
+        log.debug("fetch_availability (ZONE)  JSON parse error: %s", exc)
         return {}
 
     payload = body.get("payload", {})
-    _vlog(f"  payload dates: {len(payload)}")
+    log.debug("fetch_availability (ZONE)  payload contains %d dates", len(payload))
 
     result: dict[str, int] = {}
     for date_str, zones in payload.items():
@@ -338,10 +295,8 @@ def _fetch_availability_zone(
         result[date_str] = remaining
 
     available = sum(1 for v in result.values() if v > 0)
-    _vlog(f"  division {division_id}: {len(result)} dates, {available} with remaining > 0")
-    if result:
-        sample = dict(list(result.items())[:3])
-        _vlog(f"  sample (first 3): {sample}")
+    log.debug("fetch_availability (ZONE)  division=%s  %d dates, %d with remaining > 0",
+              division_id, len(result), available)
     return result
 
 
@@ -373,14 +328,15 @@ out body geom;
     osm_data: dict = {}
     for mirror in _OVERPASS_MIRRORS:
         try:
-            _vlog(f"POST {mirror}  query={query.strip()[:80]!r}...")
+            log.debug("fetch_trails  POST %s", mirror)
+            t0 = time.perf_counter()
             response = requests.post(mirror, data={"data": query}, timeout=90)
-            _vlog(f"  → {response.status_code}")
+            log.debug("fetch_trails  status=%d  elapsed=%.3fs", response.status_code, time.perf_counter() - t0)
             response.raise_for_status()
             osm_data = response.json()  # raises JSONDecodeError on empty/bad body
             break
         except (requests.exceptions.RequestException, requests.exceptions.JSONDecodeError) as exc:
-            _vlog(f"  error: {exc} — trying next mirror")
+            log.debug("fetch_trails  mirror error: %s — trying next", exc)
             last_exc = exc
             continue
     else:
@@ -401,9 +357,8 @@ out body geom;
             "points": [(pt["lat"], pt["lon"]) for pt in geometry],
         })
 
-    _vlog(f"  raw OSM ways: {len(raw_ways)}")
     stitched = _stitch_ways_by_name(raw_ways)
-    _vlog(f"  stitched trails: {len(stitched)}")
+    log.debug("fetch_trails  %d raw OSM ways → %d stitched trails", len(raw_ways), len(stitched))
     return stitched
 
 

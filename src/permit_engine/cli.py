@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -114,8 +115,32 @@ _DIM    = "\033[2m"
 _RESET  = "\033[0m"
 
 
+class _ShortNameFormatter(logging.Formatter):
+    """Strips the 'permit_engine.' package prefix from logger names for compact output."""
+    def format(self, record: logging.LogRecord) -> str:
+        record.shortname = record.name.split(".")[-1]
+        return super().format(record)
+
+
+log = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_ShortNameFormatter(
+        fmt="%(asctime)s  %(shortname)-8s  %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    pkg = logging.getLogger("permit_engine")
+    pkg.setLevel(logging.DEBUG)
+    pkg.addHandler(handler)
+
+
 def main() -> int:
     args = _parse_args()
+
+    if args.verbose:
+        _configure_logging()
 
     # --list-parks: just print park keys and exit.
     if args.list_parks:
@@ -240,27 +265,35 @@ def main() -> int:
                 )
                 avail_map[s["division_id"]] = [raw.get(d, -1) for d in target_dates]
 
-            n_sites       = len(raw_sites)
-            n_fully_open  = sum(1 for counts in avail_map.values() if all(c > 0 for c in counts) and counts)
-            n_fully_booked = sum(1 for counts in avail_map.values() if counts and all(c == 0 for c in counts))
-            n_partial     = n_sites - n_fully_open - n_fully_booked
+            n_sites        = len(raw_sites)
+            # Classify each site by its known (non -1) night counts.
+            # no data     = API returned nothing for every night (pre-season / not yet open)
+            # fully open  = every known night has ≥1 permit — safe to use any night
+            # fully booked = every known night is 0 — skip when building a chain
+            # partial     = some nights open, some full — check per-night columns before booking
+            n_no_data      = sum(1 for counts in avail_map.values() if all(c < 0 for c in counts))
+            n_fully_open   = sum(1 for counts in avail_map.values()
+                                 if any(c >= 0 for c in counts) and all(c > 0 for c in counts if c >= 0))
+            n_fully_booked = sum(1 for counts in avail_map.values()
+                                 if any(c >= 0 for c in counts) and all(c == 0 for c in counts if c >= 0))
+            n_partial      = n_sites - n_no_data - n_fully_open - n_fully_booked
 
+            # Stats panel: snapshot of how contested this window is.
+            stats_parts = [
+                f"[bold green]{n_fully_open} open[/bold green]",
+                f"[bold yellow]{n_partial} partial[/bold yellow]",
+                f"[bold red]{n_fully_booked} booked[/bold red]",
+            ]
+            if n_no_data:
+                stats_parts.append(f"[dim]{n_no_data} no data[/dim]")
             _console.print(_Panel(
-                f"[dim]{park_cfg['facility_id']}  ·  "
-                f"{args.start_date} → {end_date}  ({args.nights} nights)  ·  "
-                f"{source_note}[/dim]",
+                f"[dim]  ·  [/dim]".join(stats_parts) + f"[dim]  out of {n_sites} sites[/dim]",
                 title=f"[bold yellow]{park_cfg['display_name']} — Permit Availability[/bold yellow]",
+                subtitle=f"[dim]{args.start_date} → {end_date}  ·  {args.nights} nights  ·  {source_note}[/dim]",
                 expand=False,
                 border_style="yellow dim",
+                padding=(0, 2),
             ))
-
-            # Summary line: site counts by availability status.
-            _console.print(
-                f"[dim]  {n_sites} site{'s' if n_sites != 1 else ''}  ·  "
-                f"[/dim][bold green]{n_fully_open} fully open[/bold green][dim]  ·  "
-                f"[/dim][yellow]{n_partial} partial[/yellow][dim]  ·  "
-                f"[/dim][bold red]{n_fully_booked} fully booked[/bold red]"
-            )
 
             # Build table: District | Division | [sparkline per night]
             tbl = Table(
@@ -350,8 +383,6 @@ def main() -> int:
     # Select data source: live API or built-in mock data.
     if args.live:
         from permit_engine import api as data_source
-        if args.verbose:
-            data_source.set_verbose(True)
     else:
         from permit_engine import mock as data_source
 
@@ -429,12 +460,15 @@ def _search_park(
         print()
 
     # Step 1 — build the trail graph from sites and OSM trails.
-    print("Building trail graph...", end=" ", flush=True, file=_out)
+    log.debug("step 1/4 graph  fetching sites + trails, building graph")
+    _t_graph = time.perf_counter()
     raw_sites  = data_source.fetch_sites(park["facility_id"])
     raw_trails = data_source.fetch_trails(park["bbox"])
     graph = build_graph(raw_sites, raw_trails, allow_trailhead=args.trailhead)
     edge_count = sum(len(v) for v in graph.adjacency.values()) // 2
-    print(f"{len(graph.sites)} sites, {edge_count} edges", file=_out)
+    _graph_elapsed = time.perf_counter() - _t_graph
+    log.debug("step 1/4 graph  done: %d sites, %d edges  (%.3fs)", len(graph.sites), edge_count, _graph_elapsed)
+    print(f"  trail graph: {len(graph.sites)} sites, {edge_count} edges  ({_graph_elapsed:.2f}s)", file=_out)
 
     # Step 2 — fetch per-night availability.
     # Only query sites that have at least one neighbor — isolated sites can never
@@ -579,12 +613,17 @@ def _search_park(
                         )
 
     # Step 3 — DFS to find all multi-night chains.
+    _t_dfs = time.perf_counter()
     min_nights = None if args.exact_length else 1
     chains = find_chains(graph, availability, args.start_date, args.nights, min_nights=min_nights)
+    log.debug("step 3/4 dfs   %d chains found  (%.3fs)", len(chains), time.perf_counter() - _t_dfs)
 
     # Step 4 — apply --available filter when requested.
+    _before_filter = len(chains)
     if args.available:
         chains = filter_by_availability(chains, args.permit_count)
+    log.debug("step 4/4 filter  permit_count=%d  %d → %d chains",
+              args.permit_count, _before_filter, len(chains))
 
     # Step 5 — apply --limit.
     if args.limit is not None:
