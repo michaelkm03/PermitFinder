@@ -23,26 +23,28 @@
 
 ## Table of Contents
 
+⚪ Not Started &nbsp; 🔵 In Progress &nbsp; ✅ Done
+
 ### Sprint 1 — Features
-| Ticket | Feature | Points | Priority |
-|--------|---------|--------|----------|
-| [PF-101](#pf-101--availability-alerts--notify-when-a-permit-opens-up) | Availability Alerts — poll Recreation.gov and notify when a permit chain opens up | 5 | P0 |
-| [PF-102](#pf-102--multi-park-search) | Multi-Park Search — run a single search across all supported parks at once | 3 | P0 |
-| [PF-103](#pf-103--json-output-for-all-commands) | JSON Output — machine-readable output flag for all CLI commands | 2 | P1 |
+| Status | Ticket | Feature | Points | Priority |
+|--------|--------|---------|--------|----------|
+| ⚪ | <nobr>[PF-101](#pf-101--availability-alerts--notify-when-a-permit-opens-up)</nobr> | Availability Alerts — poll Recreation.gov and notify when a permit chain opens up | 5 | P0 |
+| ⚪ | <nobr>[PF-102](#pf-102--multi-park-search)</nobr> | Multi-Park Search — run a single search across all supported parks at once | 3 | P0 |
+| ⚪ | <nobr>[PF-103](#pf-103--json-output-for-all-commands)</nobr> | JSON Output — machine-readable output flag for all CLI commands | 2 | P1 |
 
 ### Sprint 1 — Engineering
-| Ticket | Task | Points | Priority |
-|--------|------|--------|----------|
-| [PF-110](#pf-110--ci-pipeline-github-actions) | CI Pipeline — GitHub Actions build and test on every push | 2 | P0 |
-| [PF-111](#pf-111--add-type-annotations-and-mypy) | Type Annotations & mypy — annotate api.py and cli.py; add mypy to CI | 3 | P1 |
-| [PF-112](#pf-112--remove-dead-code--_is_group_site) | Remove Dead Code — delete unused `_is_group_site()` from api.py | 1 | P1 |
+| Status | Ticket | Task | Points | Priority |
+|--------|--------|------|--------|----------|
+| ⚪ | <nobr>[PF-110](#pf-110--ci-pipeline-github-actions)</nobr> | CI Pipeline — GitHub Actions build and test on every push | 2 | P0 |
+| ⚪ | <nobr>[PF-111](#pf-111--add-type-annotations-and-mypy)</nobr> | Type Annotations & mypy — annotate api.py and cli.py; add mypy to CI | 3 | P1 |
+| ⚪ | <nobr>[PF-112](#pf-112--remove-dead-code--_is_group_site)</nobr> | Remove Dead Code — delete unused `_is_group_site()` from api.py | 1 | P1 |
 
 ### Backlog — Features
-| Ticket | Feature | Points |
-|--------|---------|--------|
-| [PF-201](#pf-201--saved-searches) | Saved Searches — save and re-run named search configurations locally | 5 |
-| [PF-202](#pf-202--trip-export--ical-and-plain-text) | Trip Export — export a permit chain as an iCal file or plain-text itinerary | 3 |
-| [PF-203](#pf-203--enchantments-zone-full-support) | Enchantments ZONE Support — complete end-to-end support for ZONE-type permits | 5 |
+| Status | Ticket | Feature | Points |
+|--------|--------|---------|--------|
+| ⚪ | <nobr>[PF-201](#pf-201--saved-searches)</nobr> | Saved Searches — save and re-run named search configurations locally | 5 |
+| ⚪ | <nobr>[PF-202](#pf-202--trip-export--ical-and-plain-text)</nobr> | Trip Export — export a permit chain as an iCal file or plain-text itinerary | 3 |
+| ⚪ | <nobr>[PF-203](#pf-203--enchantments-zone-full-support)</nobr> | Enchantments ZONE Support — complete end-to-end support for ZONE-type permits | 5 |
 
 ---
 
@@ -65,10 +67,9 @@ availability alerts, addressing the two most common user requests from beta.
 ---
 
 ### PF-101 · Availability Alerts — Notify When a Permit Opens Up
-**Epic:** Notifications
-**Type:** Feature
-**Points:** 5
-**Priority:** P0
+| Epic | Type | Points | Priority |
+|------|------|--------|----------|
+| Notifications | Feature | 5 | P0 |
 
 **Product Request:**
 > "The most common feedback we get is 'I found a route I want but there were no
@@ -126,10 +127,9 @@ point a summary of alerts fired is printed.
 ---
 
 ### PF-102 · Multi-Park Search
-**Epic:** Search
-**Type:** Feature
-**Points:** 3
-**Priority:** P0
+| Epic | Type | Points | Priority |
+|------|------|--------|----------|
+| Search | Feature | 3 | P0 |
 
 **Product Request:**
 > "A lot of users are flexible on which park they go to — they just want permits
@@ -186,10 +186,9 @@ user can identify which park it belongs to.
 ---
 
 ### PF-103 · JSON Output for All Commands
-**Epic:** Integrations
-**Type:** Feature
-**Points:** 2
-**Priority:** P1
+| Epic | Type | Points | Priority |
+|------|------|--------|----------|
+| Integrations | Feature | 2 | P1 |
 
 **Product Request:**
 > "Power users want to pipe PermitFinder output into their own scripts and
@@ -246,10 +245,9 @@ reliability and maintainability of the live data path.
 ---
 
 ### PF-110 · CI Pipeline (GitHub Actions)
-**Epic:** Platform
-**Type:** Engineering
-**Points:** 2
-**Priority:** P0
+| Epic | Type | Points | Priority |
+|------|------|--------|----------|
+| Platform | Engineering | 2 | P0 |
 
 **Modules Affected:** All (build and test validation only — no runtime changes)
 
@@ -264,10 +262,9 @@ reliability and maintainability of the live data path.
 ---
 
 ### PF-111 · Add Type Annotations and mypy
-**Epic:** Platform
-**Type:** Engineering
-**Points:** 3
-**Priority:** P1
+| Epic | Type | Points | Priority |
+|------|------|--------|----------|
+| Platform | Engineering | 3 | P1 |
 
 **Modules Affected:** `api.py`, `cli.py`
 
@@ -280,10 +277,9 @@ reliability and maintainability of the live data path.
 ---
 
 ### PF-112 · Remove Dead Code — `_is_group_site()`
-**Epic:** Platform
-**Type:** Engineering
-**Points:** 1
-**Priority:** P1
+| Epic | Type | Points | Priority |
+|------|------|--------|----------|
+| Platform | Engineering | 1 | P1 |
 
 **Modules Affected:** `api.py`
 
@@ -298,9 +294,9 @@ reliability and maintainability of the live data path.
 ---
 
 ### PF-201 · Saved Searches
-**Epic:** Search
-**Type:** Feature
-**Points:** 5
+| Epic | Type | Points |
+|------|------|--------|
+| Search | Feature | 5 |
 
 **Product Request:**
 > "Users run the same search every weekend morning. Let them save a search
@@ -346,9 +342,9 @@ the user had typed them on the command line.
 ---
 
 ### PF-202 · Trip Export — iCal and Plain Text
-**Epic:** Trip Planning
-**Type:** Feature
-**Points:** 3
+| Epic | Type | Points |
+|------|------|--------|
+| Trip Planning | Feature | 3 |
 
 **Product Request:**
 > "Once a user finds a permit chain they want, they need to go book it. Right
@@ -397,9 +393,9 @@ selects a specific result.
 ---
 
 ### PF-203 · Enchantments (ZONE) Full Support
-**Epic:** Search
-**Type:** Feature
-**Points:** 5
+| Epic | Type | Points |
+|------|------|--------|
+| Search | Feature | 5 |
 
 **Product Request:**
 > "The Enchantments is the most sought-after permit in Washington and we don't

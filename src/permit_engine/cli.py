@@ -240,23 +240,29 @@ def main() -> int:
                 )
                 avail_map[s["division_id"]] = [raw.get(d, -1) for d in target_dates]
 
-            n_sites = len(raw_sites)
-            n_open_sites = sum(
-                1 for div_id, counts in avail_map.items()
-                if any(c > 0 for c in counts)
-            )
+            n_sites       = len(raw_sites)
+            n_fully_open  = sum(1 for counts in avail_map.values() if all(c > 0 for c in counts) and counts)
+            n_fully_booked = sum(1 for counts in avail_map.values() if counts and all(c == 0 for c in counts))
+            n_partial     = n_sites - n_fully_open - n_fully_booked
 
             _console.print(_Panel(
                 f"[dim]{park_cfg['facility_id']}  ·  "
                 f"{args.start_date} → {end_date}  ({args.nights} nights)  ·  "
-                f"{n_sites} site{'s' if n_sites != 1 else ''}  ·  "
-                f"{n_open_sites} with availability  ·  {source_note}[/dim]",
+                f"{source_note}[/dim]",
                 title=f"[bold yellow]{park_cfg['display_name']} — Permit Availability[/bold yellow]",
                 expand=False,
                 border_style="yellow dim",
             ))
 
-            # Build table: District | Division | [sparkline per night] | Min | Open
+            # Summary line: site counts by availability status.
+            _console.print(
+                f"[dim]  {n_sites} site{'s' if n_sites != 1 else ''}  ·  "
+                f"[/dim][bold green]{n_fully_open} fully open[/bold green][dim]  ·  "
+                f"[/dim][yellow]{n_partial} partial[/yellow][dim]  ·  "
+                f"[/dim][bold red]{n_fully_booked} fully booked[/bold red]"
+            )
+
+            # Build table: District | Division | [sparkline per night]
             tbl = Table(
                 box=rich_box.SIMPLE_HEAD,
                 show_header=True,
@@ -270,8 +276,6 @@ def main() -> int:
             # One column per night (date label as header).
             for lbl in date_labels:
                 tbl.add_column(lbl, justify="center", width=7, no_wrap=True)
-            tbl.add_column("Min",  justify="right", width=5)
-            tbl.add_column("Open", justify="right", width=6)
 
             # Group rows by district.
             sorted_sites = sorted(raw_sites, key=lambda x: ((x.get("district") or ""), x["name"]))
@@ -315,13 +319,10 @@ def main() -> int:
                     min_cell  = Text(f"  {min_av}", style="bold green")
                     open_cell = Text(f"{n_open}/{n_total}", style="green")
 
-                tbl.add_row(district, s["name"], *night_cells, min_cell, open_cell)
+                tbl.add_row(district, s["name"], *night_cells)
 
             _console.print(tbl)
-            _console.print(
-                "[dim]  Nightly columns show permits remaining. "
-                "Min = worst night. Open = nights with ≥ 1 remaining.[/dim]\n"
-            )
+            _console.print("[dim]  Nightly columns show permits remaining.[/dim]\n")
 
         return 0
 
