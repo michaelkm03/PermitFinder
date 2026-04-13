@@ -73,16 +73,45 @@ wa-permits --park olympic --list-areas --live   # use real site data
 
 ### `--list-availability`
 
-Flat table of every campsite's per-night permit counts: District / Division / one column per night. Above the table, a summary line breaks down the full site count:
-
-- **N fully open** — every night in the window has at least 1 permit remaining; bookable on any night
-- **N partial** — some nights open, some fully booked; useful depending on which specific nights you need
-- **N fully booked** — every night is at 0 remaining; dead ends for these dates
+Shows every campsite in the park with per-night permit counts for your date window. Useful for scouting availability before running a chain search, or for understanding how competitive a date range is across the whole park.
 
 ```bash
 wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5
 wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5 --live --area Hoh
 ```
+
+#### Stats panel
+
+Above the table, a summary panel shows how contested the window is at a glance:
+
+| Status | Meaning |
+|---|---|
+| **N open** | Campsites where every night has ≥1 permit remaining — bookable online any night |
+| **N partial** | Campsites where some nights are open and some are full or walk-up — check per-night columns |
+| **N booked** | Campsites where every night is at 0 — fully booked, no permits anywhere |
+| **N walk-up** | Campsites where all dates show in-station only — no online booking; obtain at a ranger station |
+| **N no data** | Campsites with no availability data returned — typically pre-season before reservations open |
+
+If `booked` is high relative to the total, consider shifting your dates. `walk-up` sites can still be used but require visiting a ranger station on the day of your trip.
+
+#### Table columns
+
+| Column | Description |
+|---|---|
+| **District** | Named area of the park (e.g. "Hoh", "Sol Duc"). Sites are grouped and separated by district. |
+| **Division** | Individual campsite name — exactly as it appears on Recreation.gov. Names often include useful context: `(No Campfires)` means fire restrictions apply, `Stock Camp` is for stock/horse parties, `Group Site` is for larger groups, and some include distance from the trailhead (e.g. `14 miles from trailhead`). |
+| **Date columns** | One column per night in your window showing permit status for that site on that night. |
+
+#### Cell values
+
+| Value | Meaning |
+|---|---|
+| **`100`** (or any number) | Permits remaining for online booking. `100` typically means wide open; `1` or `2` means nearly full |
+| **`full`** | 0 remaining — that night is sold out online and no walk-up quota exists |
+| **`stn`** | Walk-up / in-station only — the online quota is 0, but ranger-station permits are still available. Recreation.gov shows this as "In Station". Must obtain in person at the park entrance station |
+| **`·`** | No data — API returned nothing for this date (pre-season or not yet open) |
+
+> **What is "In Station"?** Recreation.gov tracks two quota types: online reservations (`ConstantQuotaUsageDaily`) and ranger-station walk-ups (`QuotaUsageByMemberDaily`). When the online quota hits 0 but the walk-up quota is still positive, Recreation.gov shows the date as "In Station". This tool shows those dates as `stn` — they're not blocked but require a visit to the park entrance station, typically on the morning of your trip.
 
 ### `--list-chains`
 
@@ -123,7 +152,7 @@ wa-permits --park rainier --list-chains --start-date 2026-07-22 --nights 7 --liv
 
 **Without `--available`**: all physically possible chains are shown with availability counts. Useful for route planning before booking season opens.
 
-**With `--available`**: only chains where every night has `remaining >= permit_count` are shown. Use this when actively trying to book.
+**With `--available`**: only chains where every night has `remaining >= permit_count` permits available **online** are shown. Walk-up (`stn`) nights do not satisfy this filter — they show as "station" rather than a count. Use this flag when actively trying to book online.
 
 ### `--trailhead`
 
@@ -135,7 +164,7 @@ Genuine mid-trail junctions (a spur branching off a main trail mid-route) are al
 
 Live queries make one Recreation.gov call per connected site (with a 0.5s rate limit). Two optimizations reduce total calls:
 
-- **Probe-first**: the first site in a district is fetched, and if every target date is fully booked, all remaining sites in that district are assumed booked — no further calls needed.
+- **Probe-first**: the first site in a district is fetched. If every target date is fully booked (0) or walk-up only (-2), all remaining sites in that district are assumed to match — no further calls needed.
 - **Pre-season short-circuit**: an empty response means availability data doesn't exist yet; the run stops without additional calls.
 
 Use `--area` to restrict to specific districts and `--detail-limit` to cap how many districts are queried.
@@ -243,7 +272,7 @@ Run `--list-availability` for the full date window you care about. This gives yo
 wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 7 --live
 ```
 
-Above the table a summary line shows: **N fully open** (bookable every night), **N partial** (some nights available), **N fully booked** (no availability at all). Use this to quickly gauge how competitive the window is before drilling into individual sites.
+A stats panel above the table shows three counts — **open all nights**, **partial**, and **fully booked** — so you can gauge how competitive the window is before reading individual rows. If fully booked is high relative to total sites, consider shifting your dates.
 
 **Step 2 — Focus on the district where your existing bookings are**
 

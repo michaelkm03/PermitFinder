@@ -141,9 +141,22 @@ def fetch_availability(
     """
     Fetch per-night permit availability for one division/site.
 
-    Returns a dict mapping date strings (YYYY-MM-DD) to remaining permit count.
-    A count of 0 means fully booked. An empty dict means data is unavailable
-    (pre-season, API error, or no quota data present in response).
+    Returns a dict mapping date strings (YYYY-MM-DD) to remaining permit count:
+      > 0  — permits available for online booking
+        0  — fully booked (no permits of any kind)
+       -2  — walk-up / in-station only: online quota is 0 but ranger-station
+              quota (QuotaUsageByMemberDaily) is still > 0. The site appears as
+              "In Station" on recreation.gov — permits must be obtained in person.
+    An empty dict means data is unavailable (pre-season, API error, or no quota
+    data present in the response).
+
+    The distinction between 0 and -2 comes from two quota types in the API
+    response (confirmed via HAR capture):
+      ConstantQuotaUsageDaily  — online reservation quota (what you book online)
+      QuotaUsageByMemberDaily  — total quota including ranger-station walk-ups
+
+    When ConstantQuotaUsageDaily.remaining = 0 but QuotaUsageByMemberDaily.remaining > 0,
+    the date is walk-up only. Both at 0 means the date is truly fully booked.
 
     Endpoints confirmed via HAR capture on the detailed-availability page:
       "ITINERARY" — /api/permititinerary/{facility_id}/division/{div_id}/availability/month
@@ -209,13 +222,28 @@ def fetch_availability(
     # remaining > 0 → bookable now on recreation.gov.
     # remaining = 0 → fully reserved for that date.
     # Empty dict   → pre-season, no reservation data exists yet.
-    quota_maps = payload.get("quota_type_maps", {}) if isinstance(payload, dict) else {}
-    daily = quota_maps.get("ConstantQuotaUsageDaily", {})
+    quota_maps   = payload.get("quota_type_maps", {}) if isinstance(payload, dict) else {}
+    daily        = quota_maps.get("ConstantQuotaUsageDaily", {})
+    member_daily = quota_maps.get("QuotaUsageByMemberDaily", {})
 
     if daily:
-        result = {date_str: entry["remaining"] for date_str, entry in daily.items()}
+        result: dict[str, int] = {}
+        for date_str, entry in daily.items():
+            const_rem = entry["remaining"]
+            if const_rem == 0:
+                # Online quota exhausted. Check whether walk-up (ranger-station)
+                # quota remains. QuotaUsageByMemberDaily tracks all permit types
+                # including those issued at the station rather than online.
+                member_entry = member_daily.get(date_str, {})
+                member_rem   = member_entry.get("remaining", 0) if member_entry else 0
+                result[date_str] = -2 if member_rem > 0 else 0
+            else:
+                result[date_str] = const_rem
+
         available = sum(1 for v in result.values() if v > 0)
-        log.debug("fetch_availability  %d dates returned, %d with remaining > 0", len(result), available)
+        walkup    = sum(1 for v in result.values() if v == -2)
+        log.debug("fetch_availability  %d dates: %d available online, %d walk-up, %d booked",
+                  len(result), available, walkup, len(result) - available - walkup)
         _availability_cache[cache_key] = result
         return result
 

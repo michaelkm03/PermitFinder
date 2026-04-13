@@ -34,7 +34,11 @@ log = logging.getLogger(__name__)
 class ChainLink:
     site: Site
     night_date: date
-    # Permits remaining at this site on night_date. -1 = not fetched.
+    # Permits remaining at this site on night_date:
+    #  > 0  available for online booking
+    #    0  fully booked (no permits of any kind)
+    #   -2  walk-up / in-station only — online quota is 0 but ranger-station quota remains
+    #   -1  not fetched (pre-season or no API data)
     remaining: int
 
 
@@ -55,14 +59,24 @@ class Chain:
         return len(self.links)
 
     def min_remaining(self) -> int:
-        """Lowest availability count across all nights. -1 if any is unknown."""
+        """
+        Lowest availability count across all nights.
+        Returns -1 if any night has no API data (pre-season).
+        Returns -2 if all nights have data but some are walk-up only (no -1s).
+        Returns 0 if any night is fully booked (no walk-up, no unknowns).
+        Returns >0 if all nights have online permits remaining.
+        """
         counts = [link.remaining for link in self.links]
         if any(c == -1 for c in counts):
             return -1
-        return min(counts)
+        return min(counts)  # may be -2 (walk-up), 0 (booked), or >0 (open)
 
     def meets_permit_count(self, permit_count: int) -> bool:
-        """True if every night has at least permit_count permits remaining."""
+        """
+        True if every night has at least permit_count permits available online.
+        Walk-up nights (remaining == -2) do not satisfy this check since they
+        cannot be booked through recreation.gov.
+        """
         return all(link.remaining >= permit_count for link in self.links)
 
 

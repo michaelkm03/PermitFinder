@@ -266,17 +266,27 @@ def main() -> int:
                 avail_map[s["division_id"]] = [raw.get(d, -1) for d in target_dates]
 
             n_sites        = len(raw_sites)
-            # Classify each site by its known (non -1) night counts.
-            # no data     = API returned nothing for every night (pre-season / not yet open)
-            # fully open  = every known night has ≥1 permit — safe to use any night
-            # fully booked = every known night is 0 — skip when building a chain
-            # partial     = some nights open, some full — check per-night columns before booking
-            n_no_data      = sum(1 for counts in avail_map.values() if all(c < 0 for c in counts))
+            # Classify each site by its known night counts. Values:
+            #  > 0  bookable online         0  fully booked
+            #   -2  walk-up / in-station   -1  no data (pre-season)
+            #
+            # no data     = all -1: API returned nothing (pre-season / not yet open)
+            # walk-up     = all known are -2: ranger-station permits only, no online booking
+            # fully open  = all known > 0: online booking available every night
+            # fully booked= all known are 0: no permits anywhere every night
+            # partial     = mixed: check per-night columns before booking
+            n_no_data      = sum(1 for counts in avail_map.values()
+                                 if all(c == -1 for c in counts))
+            n_walkup       = sum(1 for counts in avail_map.values()
+                                 if not all(c == -1 for c in counts)
+                                 and all(c in (-1, -2) for c in counts))
             n_fully_open   = sum(1 for counts in avail_map.values()
-                                 if any(c >= 0 for c in counts) and all(c > 0 for c in counts if c >= 0))
+                                 if any(c != -1 for c in counts)
+                                 and all(c > 0 or c == -1 for c in counts))
             n_fully_booked = sum(1 for counts in avail_map.values()
-                                 if any(c >= 0 for c in counts) and all(c == 0 for c in counts if c >= 0))
-            n_partial      = n_sites - n_no_data - n_fully_open - n_fully_booked
+                                 if any(c == 0 for c in counts)
+                                 and all(c in (-1, 0) for c in counts))
+            n_partial      = n_sites - n_no_data - n_walkup - n_fully_open - n_fully_booked
 
             # Stats panel: snapshot of how contested this window is.
             stats_parts = [
@@ -284,6 +294,8 @@ def main() -> int:
                 f"[bold yellow]{n_partial} partial[/bold yellow]",
                 f"[bold red]{n_fully_booked} booked[/bold red]",
             ]
+            if n_walkup:
+                stats_parts.append(f"[cyan]{n_walkup} walk-up[/cyan]")
             if n_no_data:
                 stats_parts.append(f"[dim]{n_no_data} no data[/dim]")
             _console.print(_Panel(
@@ -329,10 +341,12 @@ def main() -> int:
                 # Per-night cells.
                 night_cells: list[Text] = []
                 for c in counts:
-                    if c < 0:
-                        night_cells.append(Text("  ·  ", style="dim"))
+                    if c == -2:
+                        night_cells.append(Text("  stn", style="cyan"))    # walk-up / in-station
+                    elif c < 0:
+                        night_cells.append(Text("  ·  ", style="dim"))     # no data (pre-season)
                     elif c == 0:
-                        night_cells.append(Text(" full", style="bold red"))
+                        night_cells.append(Text(" full", style="bold red")) # fully booked
                     elif c == 1:
                         night_cells.append(Text(f"  1  ", style="bold yellow"))
                     else:
@@ -566,20 +580,30 @@ def _search_park(
                 print(f"done ({api_calls} call — pre-season, no data) [{time.perf_counter() - _fetch_t0:.1f}s]", file=_out)
                 avail_status = "pre_season"
             else:
-                all_zero = probe and not any(probe[d] > 0 for d in probe)
+                all_no_online = probe and not any(probe[d] > 0 for d in probe)
+                any_walkup    = probe and any(probe[d] == -2 for d in probe)
 
-                if all_zero:
-                    # Every target date is 0 — fully booked for this window.
-                    # Propagate to all capped sites; no further calls needed.
+                if all_no_online:
+                    # No online booking available for any target date. Either fully
+                    # booked (all 0) or walk-up / in-station only (some -2).
+                    # Propagate probe to all district sites; no further API calls needed.
                     for sid in site_ids:
                         availability[sid] = probe
                     saved = n_capped - 1
-                    print(
-                        f"done ({api_calls} call — all dates fully booked, {saved} calls saved)"
-                        f" [{time.perf_counter() - _fetch_t0:.1f}s]",
-                        file=_out,
-                    )
-                    avail_status = "all_booked"
+                    if any_walkup:
+                        print(
+                            f"done ({api_calls} call — walk-up/station only, {saved} calls saved)"
+                            f" [{time.perf_counter() - _fetch_t0:.1f}s]",
+                            file=_out,
+                        )
+                        avail_status = "all_walkup"
+                    else:
+                        print(
+                            f"done ({api_calls} call — all dates fully booked, {saved} calls saved)"
+                            f" [{time.perf_counter() - _fetch_t0:.1f}s]",
+                            file=_out,
+                        )
+                        avail_status = "all_booked"
                 else:
                     avail_status = "live"
                     availability[site_ids[0]] = probe
@@ -911,7 +935,15 @@ _console = Console(highlight=False)
 
 
 def _avail_text(remaining: int) -> Text:
-    """Single-night availability as a coloured Rich Text cell."""
+    """Single-night availability as a coloured Rich Text cell.
+
+    remaining > 0  : permits available online
+    remaining == 0 : fully booked (no permits anywhere)
+    remaining == -2: walk-up / in-station only (must obtain at ranger station)
+    remaining < 0  : no data (pre-season or API error)
+    """
+    if remaining == -2:
+        return Text("station", style="cyan")
     if remaining < 0:
         return Text("--", style="dim")
     if remaining == 0:
@@ -983,6 +1015,15 @@ def _print_avail_status_banner(avail_status: str, park_name: str, chain_count: i
             "Check back for cancellations or try different dates.[/dim]",
             title="[bold red]Fully Booked[/bold red]",
             border_style="red",
+            expand=False,
+        ))
+    elif avail_status == "all_walkup":
+        _console.print(_Panel(
+            "[bold cyan]All dates show walk-up / in-station only — no online booking available.[/bold cyan]\n"
+            "[dim]These sites require permits obtained in person at a ranger station.\n"
+            "Chains below show physically possible routes for planning purposes.[/dim]",
+            title="[bold cyan]Walk-up / In-Station Only[/bold cyan]",
+            border_style="cyan",
             expand=False,
         ))
     elif avail_status == "pre_season":
@@ -1101,12 +1142,14 @@ def _build_chain_json(
     min_rem = chain.min_remaining()
     if min_rem == -1:
         avail_status = "unknown"
+    elif min_rem == -2:
+        avail_status = "walk_up"    # all known, but some / all are walk-up only
     elif min_rem == 0:
         avail_status = "booked"
     elif all(l.remaining > 0 for l in links):
         avail_status = "available"
     else:
-        avail_status = "partial"
+        avail_status = "partial"    # mix of open, walk-up, or booked
 
     night1 = links[0].night_date.strftime("%Y-%m-%d")
     booking_url = (
@@ -1116,13 +1159,18 @@ def _build_chain_json(
 
     nights_detail = []
     for j, link in enumerate(links, 1):
-        rem = link.remaining if link.remaining >= 0 else None
-        if rem is None:
-            ns = "unknown"
-        elif rem == 0:
-            ns = "booked"
+        if link.remaining == -2:
+            rem = None
+            ns  = "walk_up"     # ranger-station only; no online quota remaining
+        elif link.remaining < 0:
+            rem = None
+            ns  = "unknown"
+        elif link.remaining == 0:
+            rem = 0
+            ns  = "booked"
         else:
-            ns = "available"
+            rem = link.remaining
+            ns  = "available"
         nights_detail.append({
             "night": j,
             "date": str(link.night_date),
