@@ -3,13 +3,18 @@ wa-permits CLI
 
 Find multi-night backpacking chains where every campsite has available permits.
 
+Chain search is the default — just supply --park, --start-date, and --nights.
+
 Usage examples
 --------------
   # List all supported park names:
   wa-permits --list-parks
 
-  # Show all possible 5-night chains for North Cascades (mock data):
+  # Find all 5-night chains for North Cascades (mock data, no network):
   wa-permits --park north-cascades --start-date 2026-07-15 --nights 5
+
+  # Same with live Recreation.gov + OpenStreetMap data:
+  wa-permits --park north-cascades --start-date 2026-07-15 --nights 5 --live
 
   # Search multiple parks at once:
   wa-permits --park north-cascades olympic --start-date 2026-07-15 --nights 5 --live
@@ -21,38 +26,23 @@ Usage examples
   wa-permits --park north-cascades --start-date 2026-07-15 --nights 5 --live \\
       --permit-count 2 --available
 
-  # Include trailhead-connected routes (separate trails sharing a parking lot):
-  wa-permits --park rainier --start-date 2026-07-22 --nights 7 --trailhead
+  # Search only specific areas (case-insensitive substring match):
+  wa-permits --park olympic --start-date 2026-07-15 --nights 5 --live --area "Hoh"
 
-  # Limit results to the first 20 chains:
-  wa-permits --park olympic --start-date 2026-07-15 --nights 5 --live --limit 20
+  # Variable-length chains (1 through 5 nights), grouped longest-first:
+  wa-permits --park rainier --start-date 2026-07-15 --nights 5 --no-exact-length
 
-  # Limit API calls to 1 district of sites (reduces traffic; use --limit to cap chains):
-  wa-permits --park olympic --start-date 2026-07-15 --nights 5 --live --detail-limit 1
+  # Output chain data as JSON (progress on stderr, clean JSON on stdout):
+  wa-permits --park rainier --start-date 2026-07-15 --nights 5 --json
+  wa-permits --park all --start-date 2026-07-15 --nights 5 --limit 50 --json > chains.json
 
-  # Show district names and site counts for a park (fast, no availability fetch):
+  # Show district names and site counts for a park (no availability fetch):
   wa-permits --park olympic --list-areas
   wa-permits --park olympic --list-areas --live
 
-  # Find multi-night permit chains with availability:
-  wa-permits --park olympic --list-chains --start-date 2026-07-15 --nights 5
-  wa-permits --park olympic --list-chains --start-date 2026-07-15 --nights 5 --live
-
-  # Search only specific areas (case-insensitive substring match):
-  wa-permits --park olympic --list-chains --start-date 2026-07-15 --nights 5 --live --area "Carbon River" "Mowich"
-
-  # Output chain data as JSON (progress on stderr, clean JSON on stdout):
-  wa-permits --park rainier --list-chains --start-date 2026-07-15 --nights 5 --json
-  wa-permits --park all --list-chains --start-date 2026-07-15 --nights 5 --limit 50 --json > chains.json
-
-  # Variable-length chains (1 through 5 nights), grouped longest-first:
-  wa-permits --park rainier --list-chains --start-date 2026-07-15 --nights 5 --no-exact-length
-
-  # Flat availability table (Facility / District / Division / remaining / date range):
+  # Flat per-site availability table for a date window:
   wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5
-  wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5 --live
   wa-permits --park olympic --list-availability --start-date 2026-07-15 --nights 5 --live --area Hoh
-  wa-permits --park all    --list-availability --start-date 2026-07-15 --nights 5
 """
 from __future__ import annotations
 
@@ -189,20 +179,34 @@ def main() -> int:
                 show_header=True,
                 header_style="bold dim",
                 pad_edge=True,
+                expand=False,
             )
-            tbl.add_column("Area (District)", min_width=32)
-            tbl.add_column("Sites", justify="right", width=6)
-            tbl.add_column("Node Types", min_width=20)
+            tbl.add_column("District",  min_width=22, style="dim")
+            tbl.add_column("Site",      min_width=30)
+            tbl.add_column("Type",      min_width=12)
+            tbl.add_column("Lat",       width=10)
+            tbl.add_column("Lon",       width=11)
 
+            prev_dist = None
             for dist in sorted(district_sites):
-                type_set = sorted({
-                    (s.get("type") or "—").strip() or "—"
-                    for s in district_sites[dist]
-                })
-                types_str = ", ".join(type_set)
-                tbl.add_row(dist, str(len(district_sites[dist])), types_str)
+                for s in sorted(district_sites[dist], key=lambda x: x["name"]):
+                    site_type = (s.get("type") or "—").strip() or "—"
+                    lat = s.get("lat") or s.get("latitude") or 0.0
+                    lon = s.get("lon") or s.get("longitude") or 0.0
+                    lat_str = f"{lat:.5f}" if lat else "—"
+                    lon_str = f"{lon:.5f}" if lon else "—"
+
+                    if prev_dist is not None and dist != prev_dist:
+                        tbl.add_section()
+                    prev_dist = dist
+
+                    tbl.add_row(dist, s["name"], site_type, lat_str, lon_str)
 
             _console.print(tbl)
+            if not args.live:
+                _console.print(
+                    "[yellow]  Showing synthetic mock data. Add --live to fetch real sites from Recreation.gov.[/yellow]"
+                )
             _console.print(
                 f"[dim]  Use --list-chains --start-date DATE --nights N to find permit chains "
                 f"within these areas.[/dim]"
@@ -241,7 +245,12 @@ def main() -> int:
         for pk in park_keys_av:
             park_cfg    = PARKS[pk]
             permit_type = park_cfg.get("permit_type", "ITINERARY")
-            raw_sites   = _av_ds.fetch_sites(park_cfg["facility_id"])
+
+            if args.live:
+                print(f"Fetching sites for {park_cfg['display_name']}...", end=" ", flush=True)
+            raw_sites = _av_ds.fetch_sites(park_cfg["facility_id"])
+            if args.live:
+                print(f"{len(raw_sites)} sites found.")
 
             # Apply --area filter.
             if args.area:
@@ -249,10 +258,14 @@ def main() -> int:
                     s for s in raw_sites
                     if any(f.lower() in (s.get("district") or "").lower() for f in args.area)
                 ]
+                if args.live:
+                    print(f"  Filtered to {len(raw_sites)} sites in area(s): {', '.join(args.area)}")
 
             # Fetch availability for every site.
             avail_map: dict[str, list[int]] = {}
-            for s in raw_sites:
+            if args.live:
+                print(f"Fetching availability for {len(raw_sites)} site(s)...", end=" ", flush=True)
+            for i, s in enumerate(raw_sites, 1):
                 raw = _av_ds.fetch_availability(
                     park_cfg["facility_id"],
                     s["division_id"],
@@ -264,6 +277,10 @@ def main() -> int:
                     args.start_date,
                 )
                 avail_map[s["division_id"]] = [raw.get(d, -1) for d in target_dates]
+                if args.live and args.verbose:
+                    print(f"\n  [{i}/{len(raw_sites)}] {s['name']}", end=" ", flush=True)
+            if args.live:
+                print("done.")
 
             n_sites        = len(raw_sites)
             # Classify each site by its known night counts. Values:
@@ -307,7 +324,7 @@ def main() -> int:
                 padding=(0, 2),
             ))
 
-            # Build table: District | Division | [sparkline per night]
+            # Build table: District | Division | Type | Lat | Lon | [per-night counts]
             tbl = Table(
                 box=rich_box.SIMPLE_HEAD,
                 show_header=True,
@@ -318,6 +335,9 @@ def main() -> int:
             )
             tbl.add_column("District",  min_width=20, style="dim")
             tbl.add_column("Division",  min_width=26)
+            tbl.add_column("Type",      min_width=10)
+            tbl.add_column("Lat",       width=10)
+            tbl.add_column("Lon",       width=11)
             # One column per night (date label as header).
             for lbl in date_labels:
                 tbl.add_column(lbl, justify="center", width=7, no_wrap=True)
@@ -366,20 +386,17 @@ def main() -> int:
                     min_cell  = Text(f"  {min_av}", style="bold green")
                     open_cell = Text(f"{n_open}/{n_total}", style="green")
 
-                tbl.add_row(district, s["name"], *night_cells)
+                site_type = (s.get("type") or "—").strip() or "—"
+                lat = s.get("lat") or s.get("latitude") or 0.0
+                lon = s.get("lon") or s.get("longitude") or 0.0
+                lat_str = f"{lat:.5f}" if lat else "—"
+                lon_str = f"{lon:.5f}" if lon else "—"
+
+                tbl.add_row(district, s["name"], site_type, lat_str, lon_str, *night_cells)
 
             _console.print(tbl)
             _console.print("[dim]  Nightly columns show permits remaining.[/dim]\n")
 
-        return 0
-
-    # Without --list-chains, the chain search does not run.
-    if not getattr(args, "list_chains", False):
-        _console.print("\n[dim]Specify a command:[/dim]")
-        _console.print("  [bold]--list-areas[/bold]         [dim]District overview for a park (fast, no availability fetch)[/dim]")
-        _console.print("  [bold]--list-availability[/bold]  [dim]Flat table: Facility / District / Division / remaining / dates[/dim]")
-        _console.print("  [bold]--list-chains[/bold]        [dim]Find multi-night permit chains with live or mock availability[/dim]")
-        _console.print("\n[dim]Run wa-permits --help for full usage.[/dim]")
         return 0
 
     # Resolve which parks to search.
@@ -473,16 +490,42 @@ def _search_park(
         _console.print(Panel(info, title=f"[bold yellow]{park['display_name']}[/bold yellow]", expand=False, border_style="yellow dim"))
         print()
 
-    # Step 1 — build the trail graph from sites and OSM trails.
-    log.debug("step 1/4 graph  fetching sites + trails, building graph")
+    # Step 1 — build the trail graph from sites + OSM trail geometry.
     _t_graph = time.perf_counter()
-    raw_sites  = data_source.fetch_sites(park["facility_id"])
-    raw_trails = data_source.fetch_trails(park["bbox"])
+
+    source_label = "live" if args.live else "mock"
+    print(f"  Fetching sites ({source_label})...", end=" ", flush=True, file=_out)
+    log.debug("step 1/4 graph  fetching sites  facility=%s  source=%s", park["facility_id"], source_label)
+    try:
+        raw_sites = data_source.fetch_sites(park["facility_id"])
+    except Exception as exc:
+        print(f"failed", file=_out)
+        print(f"  Error fetching sites for {park['display_name']}: {exc}", file=_out)
+        log.debug("step 1/4 graph  fetch_sites failed: %s", exc)
+        return None
+    print(f"{len(raw_sites)} sites", file=_out)
+    log.debug("step 1/4 graph  fetch_sites done: %d sites", len(raw_sites))
+
+    print(f"  Fetching trails (OSM)...", end=" ", flush=True, file=_out)
+    log.debug("step 1/4 graph  fetching trails  bbox=%s", park["bbox"])
+    try:
+        raw_trails = data_source.fetch_trails(park["bbox"])
+    except Exception as exc:
+        print(f"failed", file=_out)
+        print(f"  Error fetching trails for {park['display_name']}: {exc}", file=_out)
+        log.debug("step 1/4 graph  fetch_trails failed: %s", exc)
+        return None
+    print(f"{len(raw_trails)} trails", file=_out)
+    log.debug("step 1/4 graph  fetch_trails done: %d trails", len(raw_trails))
+
+    print(f"  Building trail graph...", end=" ", flush=True, file=_out)
     graph = build_graph(raw_sites, raw_trails, allow_trailhead=args.trailhead)
     edge_count = sum(len(v) for v in graph.adjacency.values()) // 2
+    isolated   = sum(1 for v in graph.adjacency.values() if not v)
     _graph_elapsed = time.perf_counter() - _t_graph
-    log.debug("step 1/4 graph  done: %d sites, %d edges  (%.3fs)", len(graph.sites), edge_count, _graph_elapsed)
-    print(f"  trail graph: {len(graph.sites)} sites, {edge_count} edges  ({_graph_elapsed:.2f}s)", file=_out)
+    log.debug("step 1/4 graph  done: %d sites, %d edges, %d isolated  (%.3fs)",
+              len(graph.sites), edge_count, isolated, _graph_elapsed)
+    print(f"{len(graph.sites)} sites, {edge_count} edges, {isolated} isolated  ({_graph_elapsed:.2f}s)", file=_out)
 
     # Step 2 — fetch per-night availability.
     # Only query sites that have at least one neighbor — isolated sites can never
@@ -641,6 +684,17 @@ def _search_park(
     min_nights = None if args.exact_length else 1
     chains = find_chains(graph, availability, args.start_date, args.nights, min_nights=min_nights)
     log.debug("step 3/4 dfs   %d chains found  (%.3fs)", len(chains), time.perf_counter() - _t_dfs)
+
+    # Step 3b — filter chains to --area if specified (every site in chain must match).
+    if args.area:
+        chains = [
+            c for c in chains
+            if all(
+                any(f.lower() in (link.site.district or "").lower() for f in args.area)
+                for link in c.links
+            )
+        ]
+        log.debug("step 3b area filter  %d chains after --area %s", len(chains), args.area)
 
     # Step 4 — apply --available filter when requested.
     _before_filter = len(chains)
@@ -833,18 +887,6 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--list-chains",
-        action="store_true",
-        default=False,
-        dest="list_chains",
-        help=(
-            "Find and display multi-night permit chains with availability. "
-            "Requires --start-date and --nights. "
-            "Use --live for real-time data, --area to filter by district, "
-            "--limit to cap output."
-        ),
-    )
-    parser.add_argument(
         "--list-availability",
         action="store_true",
         default=False,
@@ -888,16 +930,13 @@ def _parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
+    # Normalise park keys: accept underscores as well as hyphens (e.g. north_cascades → north-cascades).
+    if args.park:
+        args.park = [pk.replace("_", "-") for pk in args.park]
+
     # Validate required args.
     if args.list_parks:
         pass  # no other args needed
-    elif getattr(args, "list_chains", False):
-        if not args.park:
-            parser.error("--park is required for --list-chains")
-        if args.start_date is None:
-            parser.error("--start-date is required for --list-chains")
-        if args.nights is None:
-            parser.error("--nights is required for --list-chains")
     elif getattr(args, "list_availability", False):
         if not args.park:
             parser.error("--park is required for --list-availability")

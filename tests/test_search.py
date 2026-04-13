@@ -163,11 +163,19 @@ class TestFilterByAvailability:
         filter_by_availability(chains, permit_count=3)
         assert len(chains) == original_len
 
-    def test_zero_permit_count_returns_all_chains(self, graph, availability):
-        """permit_count=0 means any availability qualifies — all chains pass."""
+    def test_zero_permit_count_excludes_walkup_chains(self, graph, availability):
+        """permit_count=0 requires remaining >= 0 online; walk-up nights (-2) do not pass."""
         chains = find_chains(graph, availability, START, nights=2)
         filtered = filter_by_availability(chains, permit_count=0)
-        assert len(filtered) == len(chains)
+        # No filtered chain may contain a walk-up (-2) night.
+        for chain in filtered:
+            for link in chain.links:
+                assert link.remaining >= 0, (
+                    f"Walk-up night should not pass permit_count=0: {chain}"
+                )
+        # The count of excluded chains equals exactly those with a walk-up night.
+        walkup_chains = [c for c in chains if any(lk.remaining == -2 for lk in c.links)]
+        assert len(filtered) == len(chains) - len(walkup_chains)
 
 
 # ---------------------------------------------------------------------------
@@ -197,42 +205,32 @@ class TestTrailheadWithSearch:
     def test_trailhead_enabled_produces_more_or_equal_chains(
         self, raw_sites, raw_trails, availability
     ):
-        """
-        Adding trailhead connections can only add edges, never remove them.
-        More edges means at least as many chains.
-        """
+        """Adding trailhead connections can only add edges, never remove them."""
         graph_off = build_graph(raw_sites, raw_trails, allow_trailhead=False)
         graph_on  = build_graph(raw_sites, raw_trails, allow_trailhead=True)
         chains_off = find_chains(graph_off, availability, START, nights=2)
         chains_on  = find_chains(graph_on,  availability, START, nights=2)
         assert len(chains_on) >= len(chains_off)
 
-    def test_copper_ridge_unreachable_without_trailhead_flag(
-        self, graph, availability
-    ):
+    def test_copper_ridge_unreachable_without_trailhead_flag(self, graph, availability):
         """
-        CampF (Copper Ridge) connects to the rest of the graph only via the
-        trailhead node 9001. Without the flag, it is an isolated node and
-        cannot appear in a 2+ night chain.
+        CampF connects to the graph only via the trailhead at node 9001.
+        Without the flag it is isolated and cannot appear in any chain.
         """
         chains = find_chains(graph, availability, START, nights=2)
         copper_in_any_chain = any(
             any(link.site.division_id == CAMP_F for link in chain.links)
             for chain in chains
         )
-        assert not copper_in_any_chain, (
-            "Copper Ridge Camp should not appear in any chain when --trailhead is off"
-        )
+        assert not copper_in_any_chain
 
     def test_copper_ridge_reachable_with_trailhead_flag(
         self, graph_with_trailhead, availability
     ):
-        """With the trailhead flag on, CampF is reachable from CampA."""
         chains = find_chains(graph_with_trailhead, availability, START, nights=2)
         copper_in_any_chain = any(
             any(link.site.division_id == CAMP_F for link in chain.links)
             for chain in chains
         )
-        assert copper_in_any_chain, (
-            "Copper Ridge Camp should appear in chains when --trailhead is on"
-        )
+        assert copper_in_any_chain
+

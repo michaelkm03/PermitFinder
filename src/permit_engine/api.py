@@ -3,25 +3,25 @@ Live API calls to Recreation.gov and OpenStreetMap Overpass.
 
 Recreation.gov endpoints (no API key required):
   GET /api/permitcontent/{facility_id}
-      Returns all permit sites (divisions) with GPS coordinates and names.
+      All permit sites (divisions) for a park — names, GPS coords, district.
+      Cached 30 days in ~/.cache/permit-finder/cache.db.
 
-  ITINERARY parks (Rainier):
-    GET /api/permititinerary/{facility_id}/division/{div_id}/availability/month
-        Returns per-night permit quota via quota_type_maps.ConstantQuotaUsageDaily.
+  GET /api/permititinerary/{facility_id}/division/{div_id}/availability/month
+      Per-night permit quota for one site, for one month.
+      Response: payload.quota_type_maps.ConstantQuotaUsageDaily[date].{total, remaining}
+      Used by all supported parks (Rainier, Olympic, North Cascades).
+      No bulk endpoint exists — one call per site, confirmed via HAR.
 
-  QUOTA parks (NC, Olympic):
-    GET /api/permits/{facility_id}/divisions/{div_id}/availability
-        Returns per-night remaining counts. Shape A: {remaining:int},
-        Shape B: "Available" string. Availability API is pre-season until
-        the reservation open date; 4xx responses are treated as no data.
+  GET /api/permitinyo/{facility_id}/availabilityv2
+      Zone-based availability for Enchantments. One call returns all zones.
 
 OpenStreetMap Overpass API (no API key required):
-  Returns all named hiking trail ways within a bounding box as ordered
-  GPS polylines. OSM is the underlying trail data source for AllTrails,
-  Gaia GPS, and Caltopo.
+  Named hiking trail ways within a bounding box, as ordered GPS polylines.
+  Tried across multiple public mirrors; first successful non-empty response used.
+  Cached 30 days in ~/.cache/permit-finder/cache.db.
 
-Used only when --live is passed. The mock module mirrors these return shapes
-so the rest of the system works identically in both modes.
+Used only when --live is passed. mock.py mirrors these return shapes so the
+graph builder and search engine work identically in both modes.
 """
 from __future__ import annotations
 
@@ -32,18 +32,23 @@ from datetime import date
 
 import requests
 
-log = logging.getLogger(__name__)
+from permit_engine.cache import get_default_cache, make_key
 
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _REC_GOV_BASE = "https://www.recreation.gov/api"
+
+# Overpass mirrors tried in order; first to return a non-empty result is used.
+# osm.ch is excluded — returns 200 with 0 ways for North American bboxes.
 _OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
 # Mimic a browser so rec.gov does not reject the request.
@@ -57,19 +62,17 @@ _HEADERS = {
     "Referer": "https://www.recreation.gov/",
 }
 
-# Seconds to wait between rec.gov calls to avoid rate limiting.
-_RATE_LIMIT_SECONDS = 0.5
+_RATE_LIMIT_SECONDS = 0.5  # seconds between rec.gov calls to avoid rate limiting
 
-# In-process cache: (facility_id, division_id, month, year) -> availability dict.
-# Avoids repeat calls if the same site is queried more than once in a session.
+# Disk cache TTLs (days). Trail geometry and site lists are stable;
+# availability is never cached (changes daily).
+_TTL_TRAILS = 30
+_TTL_SITES  = 30
+
+# In-process availability cache for the current session.
+# Key: (facility_id, division_id, month, year). Prevents duplicate calls when
+# the same site appears in multiple chains being evaluated.
 _availability_cache: dict[tuple, dict[str, int]] = {}
-
-# NOTE: No bulk availability endpoint exists for ITINERARY parks.
-# Confirmed via HAR capture of rec.gov's own frontend — the browser makes one
-# GET /api/permititinerary/{facility_id}/division/{div_id}/availability/month
-# call per division. There is no facility-level endpoint that returns all
-# divisions at once. The Enchantments (ZONE) endpoint is the only bulk option
-# and is specific to that permit system.
 
 
 def fetch_sites(facility_id: str) -> list[dict]:
@@ -77,10 +80,27 @@ def fetch_sites(facility_id: str) -> list[dict]:
     Fetch all active, non-group permit sites for a park.
 
     Returns a list of dicts, each with:
-      division_id (str), name (str), lat (float), lon (float), district (str)
+      division_id (str)    — rec.gov division ID
+      name        (str)    — campsite name
+      lat         (float)  — GPS latitude
+      lon         (float)  — GPS longitude
+      district    (str)    — trail district / area name
+      type        (str)    — division type (e.g. "Campsite")
+      children    (list)   — adjacent division IDs along the trail (from rec.gov)
+
+    The children field encodes trail adjacency directly from rec.gov — no GPS
+    snapping or external map data is needed to build the trail graph.
 
     Source: GET /api/permitcontent/{facility_id}
+    Results are cached for 30 days (trail topology rarely changes).
     """
+    cache = get_default_cache()
+    cache_key = make_key("sites", facility_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        log.debug("fetch_sites  facility=%s  cache hit (%d sites)", facility_id, len(cached))
+        return cached
+
     url = f"{_REC_GOV_BASE}/permitcontent/{facility_id}"
     log.debug("fetch_sites  facility=%s  GET %s", facility_id, url)
     t0 = time.perf_counter()
@@ -119,6 +139,11 @@ def fetch_sites(facility_id: str) -> list[dict]:
         if skip_reason:
             continue
 
+        # children: list of adjacent division IDs along the trail.
+        # rec.gov stores these as strings in the API response.
+        raw_children = div.get("children") or []
+        children = [str(c) for c in raw_children if c]
+
         sites.append({
             "division_id": div_id,
             "name": div["name"],
@@ -126,9 +151,11 @@ def fetch_sites(facility_id: str) -> list[dict]:
             "lon": float(lon),
             "district": district,
             "type": div_type,
+            "children": children,
         })
 
     log.debug("fetch_sites  %d raw divisions → %d sites after filters", len(divisions), len(sites))
+    cache.set(cache_key, sites, ttl_days=_TTL_SITES)
     return sites
 
 
@@ -220,17 +247,27 @@ def fetch_availability(
 
     # ConstantQuotaUsageDaily[date].remaining — advance reservation slots left.
     # remaining > 0 → bookable now on recreation.gov.
-    # remaining = 0 → fully reserved for that date.
+    # remaining = 0 AND total > 0 → fully reserved for that date.
+    # remaining = 0 AND total = 0 → no per-site quota; fall back to bools field.
     # Empty dict   → pre-season, no reservation data exists yet.
+    #
+    # When total = 0, the site has no individual daily quota (ITINERARY parks like
+    # Olympic book against the overall itinerary, not per-site). In this case
+    # bools[date] is the authoritative availability signal (true = bookable).
     quota_maps   = payload.get("quota_type_maps", {}) if isinstance(payload, dict) else {}
     daily        = quota_maps.get("ConstantQuotaUsageDaily", {})
     member_daily = quota_maps.get("QuotaUsageByMemberDaily", {})
+    bools        = payload.get("bools", {}) if isinstance(payload, dict) else {}
 
     if daily:
         result: dict[str, int] = {}
         for date_str, entry in daily.items():
-            const_rem = entry["remaining"]
-            if const_rem == 0:
+            const_rem   = entry["remaining"]
+            const_total = entry.get("total", -1)
+            if const_rem == 0 and const_total == 0:
+                # No per-site quota configured — use bools as ground truth.
+                result[date_str] = 1 if bools.get(date_str, False) else 0
+            elif const_rem == 0:
                 # Online quota exhausted. Check whether walk-up (ranger-station)
                 # quota remains. QuotaUsageByMemberDaily tracks all permit types
                 # including those issued at the station rather than online.
@@ -335,40 +372,53 @@ def fetch_trails(bbox: tuple[float, float, float, float]) -> list[dict]:
     bbox = (south_lat, west_lon, north_lat, east_lon)
 
     Returns a list of trail dicts, each with:
-      osm_id (str)     - unique OSM way ID
-      name (str)       - trail name from OSM tags
-      node_ids (list)  - ordered OSM node IDs along the trail
-      points (list)    - ordered (lat, lon) tuples matching node_ids
+      osm_id   (str)  — unique OSM way ID
+      name     (str)  — trail name from OSM tags
+      node_ids (list) — ordered OSM node IDs along the trail
+      points   (list) — ordered (lat, lon) tuples matching node_ids
 
-    Trails that span multiple OSM way segments sharing the same name are
-    stitched into a single ordered polyline before returning.
+    Segments of the same named trail are stitched into a single ordered
+    polyline before returning.
 
-    Source: OpenStreetMap Overpass API
+    Tries each Overpass mirror in _OVERPASS_MIRRORS until one returns a
+    non-empty result. Results are cached for 30 days.
     """
-    south, west, north, east = bbox
-    bbox_str = f"{south},{west},{north},{east}"
+    bbox_str = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
+    cache = get_default_cache()
+    cache_key = make_key("trails", bbox_str)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        log.debug("fetch_trails  cache hit  %d trails  bbox=%s", len(cached), bbox_str)
+        return cached
 
-    query = f"""[out:json][timeout:60];
-way["highway"~"^(path|footway)$"]["name"]({bbox_str});
-out body geom;
-"""
-    last_exc: Exception = RuntimeError("No Overpass mirrors available")
+    # Server-side timeout of 180 s keeps Overpass from silently dropping slow queries.
+    query = (
+        f"[out:json][timeout:180][maxsize:536870912];\n"
+        f'way["highway"~"^(path|footway)$"]["name"]({bbox_str});\n'
+        f"out body geom;\n"
+    )
+
     osm_data: dict = {}
+    last_exc: Exception = RuntimeError("No Overpass mirrors available")
     for mirror in _OVERPASS_MIRRORS:
         try:
             log.debug("fetch_trails  POST %s", mirror)
             t0 = time.perf_counter()
-            response = requests.post(mirror, data={"data": query}, timeout=90)
-            log.debug("fetch_trails  status=%d  elapsed=%.3fs", response.status_code, time.perf_counter() - t0)
-            response.raise_for_status()
-            osm_data = response.json()  # raises JSONDecodeError on empty/bad body
-            break
-        except (requests.exceptions.RequestException, requests.exceptions.JSONDecodeError) as exc:
+            resp = requests.post(mirror, data={"data": query}, timeout=150)
+            elapsed = time.perf_counter() - t0
+            log.debug("fetch_trails  status=%d  elapsed=%.1fs", resp.status_code, elapsed)
+            resp.raise_for_status()
+            osm_data = resp.json()
+            if osm_data.get("elements"):
+                break  # got real data — stop trying mirrors
+            log.debug("fetch_trails  mirror returned 0 elements — trying next")
+        except (requests.exceptions.RequestException, ValueError) as exc:
             log.debug("fetch_trails  mirror error: %s — trying next", exc)
             last_exc = exc
-            continue
     else:
-        raise last_exc
+        # All mirrors failed or returned empty.
+        if not osm_data.get("elements"):
+            raise last_exc
 
     raw_ways = []
     for element in osm_data.get("elements", []):
@@ -387,6 +437,11 @@ out body geom;
 
     stitched = _stitch_ways_by_name(raw_ways)
     log.debug("fetch_trails  %d raw OSM ways → %d stitched trails", len(raw_ways), len(stitched))
+
+    # Only cache non-empty results — empty may indicate a transient failure.
+    if stitched:
+        cache.set(cache_key, stitched, ttl_days=_TTL_TRAILS)
+
     return stitched
 
 
@@ -394,27 +449,15 @@ out body geom;
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _is_group_site(name: str) -> bool:
-    """Group sites are shared campsites excluded from permit chain searches."""
-    return "Group" in name or "group" in name
-
-
 def _is_placeholder_site(name: str) -> bool:
-    """
-    Placeholder divisions in the rec.gov system represent nights spent
-    outside the wilderness (e.g., at frontcountry campgrounds). They are
-    not real backcountry sites and should not appear as graph nodes.
-    """
+    """Frontcountry placeholder divisions — not real backcountry sites."""
     return "Other Accommodations" in name or "Placeholder" in name
 
 
 def _is_zone_parent(name: str, district: str) -> bool:
     """
-    Zone/area parent nodes have the same name as their district.
-
-    rec.gov uses a parent division (name == district) as a container grouping
-    real campsites. This parent is not a bookable overnight stop and does not
-    appear on the website's availability grid — only its children do.
+    rec.gov container divisions whose name equals their district name.
+    These group real campsites but are not bookable overnight stops themselves.
     """
     return bool(name and district and name.strip() == district.strip())
 
@@ -423,12 +466,10 @@ def _stitch_ways_by_name(raw_ways: list[dict]) -> list[dict]:
     """
     Join OSM way segments that share the same trail name into single polylines.
 
-    OSM often splits a single named trail into multiple way elements where
-    the trail changes attributes (surface, access, etc.). Two segments with
-    the same name that share an endpoint node are joined in traversal order.
-
-    Segments that cannot be connected to a named trail (isolated fragments)
-    are returned individually.
+    OSM often splits a single named trail across multiple way elements where
+    attributes change (surface, access restrictions, etc.). Segments sharing
+    the same name and a common endpoint node are joined in traversal order.
+    Isolated fragments (no shared endpoints) are returned individually.
     """
     by_name: dict[str, list[dict]] = defaultdict(list)
     for way in raw_ways:
@@ -442,10 +483,10 @@ def _stitch_ways_by_name(raw_ways: list[dict]) -> list[dict]:
 
 def _stitch_segments(name: str, segments: list[dict]) -> list[dict]:
     """
-    Stitch a list of same-named trail segments into one or more polylines.
+    Stitch same-named trail segments into one or more ordered polylines.
 
-    Returns multiple polylines if the segments form disconnected sub-trails
-    (e.g., two separate trails with the same name in different valleys).
+    Returns multiple polylines when segments form disconnected sub-trails
+    (e.g. two separate trails with the same name in different valleys).
     """
     if len(segments) == 1:
         return segments
@@ -456,30 +497,25 @@ def _stitch_segments(name: str, segments: list[dict]) -> list[dict]:
         endpoint_map[seg["node_ids"][0]].append(i)
         endpoint_map[seg["node_ids"][-1]].append(i)
 
-    visited = set()
+    visited: set[int] = set()
     result = []
 
     for start_idx in range(len(segments)):
         if start_idx in visited:
             continue
 
-        # Walk the chain of segments from this starting segment.
         chain_node_ids: list[int] = []
         chain_points: list[tuple] = []
         visited.add(start_idx)
 
         seg = segments[start_idx]
-        # Orient so we start from the true trail endpoint (node shared by only one segment).
-        first_node = seg["node_ids"][0]
-        last_node = seg["node_ids"][-1]
-        start_from_beginning = len(endpoint_map[first_node]) == 1
-
+        # Orient so we start from the true trail endpoint (node in only one segment).
+        start_from_beginning = len(endpoint_map[seg["node_ids"][0]]) == 1
         node_ids = seg["node_ids"] if start_from_beginning else list(reversed(seg["node_ids"]))
-        points = seg["points"] if start_from_beginning else list(reversed(seg["points"]))
+        points   = seg["points"]   if start_from_beginning else list(reversed(seg["points"]))
         chain_node_ids.extend(node_ids)
         chain_points.extend(points)
 
-        # Follow connecting segments until no more can be appended.
         while True:
             tail_node = chain_node_ids[-1]
             next_indices = [i for i in endpoint_map[tail_node] if i not in visited]
@@ -489,8 +525,6 @@ def _stitch_segments(name: str, segments: list[dict]) -> list[dict]:
             next_idx = next_indices[0]
             visited.add(next_idx)
             next_seg = segments[next_idx]
-
-            # Append next segment in the direction that continues from tail_node.
             if next_seg["node_ids"][0] == tail_node:
                 chain_node_ids.extend(next_seg["node_ids"][1:])
                 chain_points.extend(next_seg["points"][1:])

@@ -9,27 +9,36 @@ regardless of which source is active.
 Site data is based on real North Cascades East Bank Trail division IDs and
 coordinates sourced from the rec.gov /api/permitcontent/4675322 response
 (verified March 2026 HAR export). Availability is synthetic but covers
-realistic booking scenarios.
+realistic booking scenarios including all three availability states:
+
+  > 0  permits remaining for online booking
+    0  fully booked (no permits anywhere)
+   -2  walk-up / in-station only (online quota = 0, ranger-station quota > 0)
+   -1  no data / pre-season (not represented here — mock always returns data)
 
 Mock trail topology
 -------------------
-Three trails are defined to exercise all adjacency scenarios:
+Three trails exercise all adjacency scenarios used by build_graph():
 
-  East Bank Trail (linear, 5 camps):
-      South TH (node 9001) ── CampA ── CampB ── CampC ── CampD ── North TH (node 9015)
-      All within-trail edges are always valid.
+  East Bank Trail (linear, 4 camps):
+      South TH (node 9001) ── CampA ── CampB ── CampC ── CampD ── North TH (9015)
 
-  Nightmare Loop Trail (branches off East Bank mid-trail at node 9008):
-      node 9008 is a MID-TRAIL node on East Bank Trail (index 5 of 9) AND
-      the START node of Nightmare Loop (index 0 of 4).
-      → Shared node 9008 is endpoint of Nightmare Loop but mid-trail on East Bank.
-      → This is a genuine trail junction. CampC ↔ CampE edge is ALWAYS valid.
+  Nightmare Loop Trail (genuine mid-trail junction at node 9008):
+      node 9008 is mid-trail on East Bank AND the start endpoint of Nightmare Loop.
+      CampC ↔ CampE edge is always valid (genuine junction, not trailhead).
 
-  Copper Ridge Trail (shares start node 9001 with East Bank Trail):
-      node 9001 is the START node (endpoint) of BOTH East Bank and Copper Ridge.
-      → Both trails end at the same parking lot trailhead.
-      → CampA ↔ CampF edge is a TRAILHEAD connection.
-      → Blocked when allow_trailhead=False, allowed when allow_trailhead=True.
+  Copper Ridge Trail (shared parking-lot trailhead at node 9001):
+      node 9001 is endpoint of BOTH East Bank and Copper Ridge.
+      CampA ↔ CampF edge is a TRAILHEAD connection:
+        blocked when allow_trailhead=False, allowed when allow_trailhead=True.
+
+Mock availability scenarios (2026-07-15 window)
+------------------------------------------------
+  Jul 15–17  all-open window: all sites have remaining >= 1
+  Jul 16     Roland Creek = 0 — breaks any 2-night chain through it on night 2
+  Jul 18     Devils Creek = 0 — blocks 4-night chains ending there
+  Jul 15–18  Nightmare Camp = -2 — walk-up / in-station only; shows as "stn"
+  Jul 20     all sites = 0 — fully booked, no chains possible
 """
 from __future__ import annotations
 
@@ -41,6 +50,7 @@ from datetime import date
 
 # Real division IDs and GPS coordinates from /api/permitcontent/4675322
 # (North Cascades, East Bank Trail district).
+# children encodes trail adjacency exactly as rec.gov returns it.
 _SITES = [
     {
         "division_id": "4675322083",
@@ -49,6 +59,8 @@ _SITES = [
         "lon": -121.01404,
         "district": "East Bank Trail",
         "type": "Campsite",
+        # CampA → CampB only (southernmost camp)
+        "children": ["4675322082"],
     },
     {
         "division_id": "4675322082",
@@ -57,6 +69,8 @@ _SITES = [
         "lon": -121.02096,
         "district": "East Bank Trail",
         "type": "Campsite",
+        # CampB → CampA, CampC
+        "children": ["4675322083", "4675322079"],
     },
     {
         "division_id": "4675322079",
@@ -65,6 +79,8 @@ _SITES = [
         "lon": -121.02873,
         "district": "East Bank Trail",
         "type": "Campsite",
+        # CampC → CampB, CampD, CampE (junction to Nightmare Loop)
+        "children": ["4675322082", "4675322072", "4675322_NIGHTMARE"],
     },
     {
         "division_id": "4675322072",
@@ -73,8 +89,10 @@ _SITES = [
         "lon": -121.02015,
         "district": "East Bank Trail",
         "type": "Campsite",
+        # CampD → CampC, CampE (also connects to Nightmare Loop)
+        "children": ["4675322079", "4675322_NIGHTMARE"],
     },
-    # CampE — on Nightmare Loop Trail (genuine mid-trail junction with East Bank)
+    # CampE — Nightmare Loop spur (accessible from both CampC and CampD)
     {
         "division_id": "4675322_NIGHTMARE",
         "name": "Nightmare Camp",
@@ -82,8 +100,10 @@ _SITES = [
         "lon": -120.98643,
         "district": "East Bank Trail",
         "type": "Campsite",
+        # CampE → CampC, CampD
+        "children": ["4675322079", "4675322072"],
     },
-    # CampF — on Copper Ridge Trail (trailhead connection with East Bank)
+    # CampF — isolated site (no children; exercises the isolated-node code path)
     {
         "division_id": "4675322_COPPER",
         "name": "Copper Ridge Camp",
@@ -91,6 +111,7 @@ _SITES = [
         "lon": -121.04800,
         "district": "Copper-Chilliwack",
         "type": "Campsite",
+        "children": [],
     },
 ]
 
@@ -100,47 +121,47 @@ _SITES = [
 
 # East Bank Trail — linear, runs south to north.
 # node 9001 = south trailhead (parking lot), node 9015 = north trailhead.
-# Sites snap onto this trail at the nodes nearest their real coordinates.
+# Sites snap onto this trail at nodes nearest their real coordinates.
 _EAST_BANK_TRAIL = {
     "osm_id": "100001",
     "name": "East Bank Trail",
     "node_ids": [
         9001,   # south trailhead (endpoint) — near CampF (Copper Ridge TH)
-        9002,   # approach
+        9002,
         9003,   # near CampA (Ruby Pasture, 48.7284, -121.0140)
-        9004,   # mid-section
+        9004,
         9005,   # near CampB (Roland Creek, 48.7714, -121.0210)
-        9006,   # mid-section
+        9006,
         9007,   # near CampC (May Creek, 48.7869, -121.0287)
-        9008,   # JUNCTION with Nightmare Loop Trail — mid-trail node on East Bank
+        9008,   # JUNCTION with Nightmare Loop — mid-trail node on East Bank
         9009,   # near CampD (Devils Creek, 48.8377, -121.0202)
-        9010,   # approach to north TH
+        9010,
         9015,   # north trailhead (endpoint)
     ],
     "points": [
         (48.7100, -121.0050),  # 9001 south TH
         (48.7200, -121.0100),  # 9002
-        (48.7284, -121.0140),  # 9003 — Ruby Pasture Camp snaps here
+        (48.7284, -121.0140),  # 9003 — Ruby Pasture snaps here
         (48.7500, -121.0180),  # 9004
-        (48.7714, -121.0210),  # 9005 — Roland Creek Camp snaps here
+        (48.7714, -121.0210),  # 9005 — Roland Creek snaps here
         (48.7800, -121.0250),  # 9006
-        (48.7869, -121.0287),  # 9007 — May Creek Camp snaps here
+        (48.7869, -121.0287),  # 9007 — May Creek snaps here
         (48.8200, -121.0220),  # 9008 — junction node (mid-trail on East Bank)
-        (48.8377, -121.0202),  # 9009 — Devils Creek Camp snaps here
+        (48.8377, -121.0202),  # 9009 — Devils Creek snaps here
         (48.9000, -121.0300),  # 9010
         (48.9500, -121.0380),  # 9015 north TH
     ],
 }
 
 # Nightmare Loop Trail — spur branching off East Bank at node 9008 (mid-trail).
-# node 9008 is index 0 on Nightmare Loop (its endpoint) but index 7 on East Bank
-# (a mid-trail node). Because it is NOT an endpoint of East Bank, this is a
-# genuine junction. CampC ↔ CampE is always a valid edge.
+# node 9008 is the endpoint (index 0) of Nightmare Loop but mid-trail on East Bank.
+# Because it is NOT an endpoint of East Bank, this is a genuine junction —
+# CampC ↔ CampE is always valid regardless of the --trailhead flag.
 _NIGHTMARE_LOOP_TRAIL = {
     "osm_id": "100002",
     "name": "Nightmare Loop Trail",
     "node_ids": [
-        9008,   # junction with East Bank Trail (endpoint of Nightmare Loop, mid of East Bank)
+        9008,   # junction with East Bank (endpoint of Nightmare Loop, mid of East Bank)
         9020,
         9021,   # near CampE (Nightmare Camp, 48.9338, -120.9864)
         9022,   # dead-end trailhead
@@ -153,10 +174,9 @@ _NIGHTMARE_LOOP_TRAIL = {
     ],
 }
 
-# Copper Ridge Trail — starts at the SAME parking lot as East Bank Trail
-# (both share node 9001 as their first/endpoint node).
-# Because node 9001 is an endpoint of BOTH trails, this is a trailhead
-# connection. CampA ↔ CampF edge is blocked when allow_trailhead=False.
+# Copper Ridge Trail — starts at the SAME parking lot as East Bank Trail.
+# Both trails share node 9001 as their first/endpoint node.
+# This is a trailhead connection: blocked by default, included with --trailhead.
 _COPPER_RIDGE_TRAIL = {
     "osm_id": "100003",
     "name": "Copper Ridge Trail",
@@ -179,15 +199,9 @@ _COPPER_RIDGE_TRAIL = {
 # ---------------------------------------------------------------------------
 
 # Per-site availability keyed by date string (YYYY-MM-DD) → remaining count.
-# Designed to produce known chain outcomes for testing.
-#
-# Scenario summary for 2026-07-15 start:
-#   All-available window   : Jul 15–17 (all sites have remaining >= 1)
-#   Mid-chain blocked      : Jul 16, Roland Creek = 0 (breaks 2-night chain A→B)
-#   Late-trip blocked      : Jul 18, Devils Creek = 0 (blocks 4-night chain)
-#   Fully booked day       : Jul 20 (all sites = 0, no chains possible)
+# Values:  >0 = available online   0 = fully booked   -2 = walk-up/in-station only
 _AVAILABILITY: dict[str, dict[str, int]] = {
-    "4675322083": {  # Ruby Pasture Camp
+    "4675322083": {  # Ruby Pasture Camp — mostly open, closed Jul 20
         "2026-07-15": 3,
         "2026-07-16": 2,
         "2026-07-17": 1,
@@ -195,15 +209,15 @@ _AVAILABILITY: dict[str, dict[str, int]] = {
         "2026-07-19": 3,
         "2026-07-20": 0,
     },
-    "4675322082": {  # Roland Creek Camp
+    "4675322082": {  # Roland Creek Camp — fully booked Jul 16 (breaks mid-chain)
         "2026-07-15": 2,
-        "2026-07-16": 0,  # fully booked — breaks chains through here on night of Jul 16
+        "2026-07-16": 0,
         "2026-07-17": 1,
         "2026-07-18": 2,
         "2026-07-19": 1,
         "2026-07-20": 0,
     },
-    "4675322079": {  # May Creek Camp
+    "4675322079": {  # May Creek Camp — open most nights
         "2026-07-15": 1,
         "2026-07-16": 2,
         "2026-07-17": 3,
@@ -211,23 +225,23 @@ _AVAILABILITY: dict[str, dict[str, int]] = {
         "2026-07-19": 2,
         "2026-07-20": 0,
     },
-    "4675322072": {  # Devils Creek Camp
+    "4675322072": {  # Devils Creek Camp — fully booked Jul 18 (blocks 4-night chains)
         "2026-07-15": 4,
         "2026-07-16": 3,
         "2026-07-17": 2,
-        "2026-07-18": 0,  # fully booked — blocks 4-night chains ending here
+        "2026-07-18": 0,
         "2026-07-19": 1,
         "2026-07-20": 0,
     },
-    "4675322_NIGHTMARE": {  # Nightmare Camp
-        "2026-07-15": 2,
-        "2026-07-16": 1,
-        "2026-07-17": 2,
-        "2026-07-18": 1,
-        "2026-07-19": 2,
+    "4675322_NIGHTMARE": {  # Nightmare Camp — walk-up/in-station only Jul 15–18
+        "2026-07-15": -2,
+        "2026-07-16": -2,
+        "2026-07-17": -2,
+        "2026-07-18": -2,
+        "2026-07-19": 1,   # opens for online booking Jul 19
         "2026-07-20": 0,
     },
-    "4675322_COPPER": {  # Copper Ridge Camp
+    "4675322_COPPER": {  # Copper Ridge Camp — low but available
         "2026-07-15": 1,
         "2026-07-16": 2,
         "2026-07-17": 1,
@@ -238,11 +252,31 @@ _AVAILABILITY: dict[str, dict[str, int]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Facility ID → park name (mirrors PARKS dict in cli.py)
+# ---------------------------------------------------------------------------
+
+_FACILITY_NAMES: dict[str, str] = {
+    "4675317": "Mount Rainier",
+    "4675322": "North Cascades",
+    "4098362": "Olympic National Park",
+    "445863":  "Enchantments",
+}
+
+# ---------------------------------------------------------------------------
 # Public API — same signatures as api.py
 # ---------------------------------------------------------------------------
 
 def fetch_sites(facility_id: str) -> list[dict]:  # noqa: ARG001
-    """Return mock sites. facility_id is accepted but ignored."""
+    """
+    Return mock sites. facility_id is accepted but ignored.
+
+    All parks use the same synthetic North Cascades East Bank Trail topology
+    in mock mode — the graph builder and search engine receive identical
+    data structures regardless of which park is selected.
+
+    Each site dict includes a children field listing adjacent division IDs,
+    matching the shape returned by api.fetch_sites().
+    """
     return list(_SITES)
 
 
@@ -252,14 +286,21 @@ def fetch_trails(bbox: tuple) -> list[dict]:  # noqa: ARG001
 
 
 def fetch_availability(
-    facility_id: str,  # noqa: ARG001
+    facility_id: str,   # noqa: ARG001
     division_id: str,
-    start_date: date,  # noqa: ARG001
+    start_date: date,   # noqa: ARG001
+    permit_type: str = "ITINERARY",  # noqa: ARG001 — accepted for API compatibility, ignored
 ) -> dict[str, int]:
     """
     Return mock availability for one site.
 
-    start_date is accepted but ignored — mock data covers a fixed date window.
+    start_date and permit_type are accepted but ignored — mock data covers a
+    fixed date window and does not distinguish permit types.
     Returns an empty dict for unknown division IDs.
+
+    Return values follow the same sentinel convention as api.fetch_availability():
+      > 0  permits remaining for online booking
+        0  fully booked (no permits of any kind)
+       -2  walk-up / in-station only (online quota exhausted, station quota remains)
     """
     return dict(_AVAILABILITY.get(division_id, {}))

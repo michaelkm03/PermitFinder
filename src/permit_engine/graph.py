@@ -1,5 +1,5 @@
 """
-Builds a trail graph from permit site data and OSM trail data.
+Builds a trail graph from permit site data and OSM trail geometry.
 
 Graph definition
 ----------------
@@ -7,12 +7,21 @@ Graph definition
   Edge  = two sites are directly connected by a named OSM hiking trail
           with no other permit site between them on that trail.
 
+Adjacency source
+----------------
+Trail geometry comes from the OpenStreetMap Overpass API (cached 30 days).
+Each site is snapped to the nearest point on a trail polyline. Sites within
+_SNAP_THRESHOLD_DEGREES of a trail are placed on it; their order along the
+trail determines which consecutive pairs become graph edges.
+
+Sites whose rec.gov coordinates are (0, 0) (no GPS data) are added to the
+graph as isolated nodes — they can never form a chain but appear in output.
+
 Two types of edges
 ------------------
   Within-trail edge:
       Both sites snap to the same trail polyline. The consecutive pair
-      (no other site between them on that trail) is always a valid edge —
-      a hiker walks directly from one site to the next along the trail.
+      (no other site between them on that trail) is always a valid edge.
 
   Cross-trail edge:
       Sites on different trails meet at a shared OSM node (a trail junction).
@@ -21,26 +30,22 @@ Two types of edges
 Trailhead connection definition
 --------------------------------
 A cross-trail connection is a *trailhead connection* when the shared OSM node
-is an endpoint (first or last node) of BOTH trails. That means both trails
-start or end at the same parking lot / road access point. A hiker at that node
-has exited the trail system and would need to cross a parking lot to reach the
-other trail.
+is an endpoint (first or last node) of BOTH trails — both trails start or end
+at the same parking lot. A hiker must leave the trail system to cross it.
 
 It is NOT a trailhead connection when the shared node is an endpoint of only
-one trail (a spur branching off a main trail mid-route). The hiker reaches the
-junction naturally while hiking the main trail and can turn onto the spur
-without leaving the trail system.
+one trail (a spur branching off a main trail mid-route).
 
 --trailhead flag
 -----------------
-  False (default) : trailhead connections are excluded from the graph.
-  True            : trailhead connections are included (useful for routes
-                    that intentionally exit and re-enter at a trailhead).
+  False (default) : trailhead connections are excluded.
+  True            : trailhead connections are included.
 
 Snap threshold
 --------------
-A site must be within 0.002 degrees (~200 m at 47–49 °N) of a trail to snap
-onto it. This tolerates minor GPS imprecision in the rec.gov coordinates.
+A site must be within _SNAP_THRESHOLD_DEGREES (~200 m at WA latitudes) of a
+trail polyline to snap onto it. Sites with missing GPS (lat=0, lon=0) are
+never snapped and remain isolated.
 """
 from __future__ import annotations
 
@@ -54,7 +59,7 @@ from shapely.geometry import LineString, Point
 
 log = logging.getLogger(__name__)
 
-# ~200 m expressed in degrees at Washington State latitudes.
+# ~200 m expressed in degrees at Washington State latitudes (47–49 °N).
 _SNAP_THRESHOLD_DEGREES = 0.002
 
 
@@ -85,42 +90,54 @@ def build_graph(
 
     raw_sites       : output of api.fetch_sites() or mock.fetch_sites()
     raw_trails      : output of api.fetch_trails() or mock.fetch_trails()
-    allow_trailhead : when True, also connect sites at shared trailhead nodes
-                      (parking lots where separatere trails begin / end).
+    allow_trailhead : when True, also connect sites at shared trailhead nodes.
     """
     t0 = time.perf_counter()
     log.debug("build_graph  %d raw sites, %d trails, allow_trailhead=%s",
               len(raw_sites), len(raw_trails), allow_trailhead)
 
-    _site_fields = {f.name for f in Site.__dataclass_fields__.values()}
-    # Group sites (shared campsites) are excluded from chain search — a solo/small-group
-    # backpacker cannot route through a group-reserved site. fetch_sites() already
-    # removes "(No Campfires)" group sites; here we remove remaining regular group sites.
-    sites = {
-        s["division_id"]: Site(**{k: v for k, v in s.items() if k in _site_fields})
-        for s in raw_sites
-        if "Group" not in s.get("name", "") and "group" not in s.get("name", "")
-    }
-    log.debug("build_graph  group-site filter: %d → %d nodes (%d removed)",
-              len(raw_sites), len(sites), len(raw_sites) - len(sites))
+    # Exclude group campsites — not usable by solo/small-group backpackers.
+    sites: dict[str, Site] = {}
+    no_coords: list[str] = []
+    for s in raw_sites:
+        name = s.get("name", "")
+        if "Group" in name or "group" in name:
+            log.debug("  skip group site  %s  %r", s["division_id"], name)
+            continue
+        lat = float(s.get("lat", 0) or 0)
+        lon = float(s.get("lon", 0) or 0)
+        sites[s["division_id"]] = Site(
+            division_id=s["division_id"],
+            name=name,
+            lat=lat,
+            lon=lon,
+            district=s.get("district", ""),
+        )
+        if lat == 0 or lon == 0:
+            no_coords.append(s["division_id"])
 
-    # Use sets during construction to avoid duplicate edges, then convert to
-    # sorted lists so the adjacency order is deterministic across runs.
+    log.debug("build_graph  %d nodes (%d group removed, %d missing GPS → isolated)",
+              len(sites), len(raw_sites) - len(sites), len(no_coords))
+
     adjacency: dict[str, set[str]] = {div_id: set() for div_id in sites}
+
+    # Only snap sites that have valid coordinates.
+    snappable = {div_id: site for div_id, site in sites.items()
+                 if site.lat != 0 and site.lon != 0}
 
     # Step 1 — within-trail edges (always valid).
     t1 = time.perf_counter()
     for raw_trail in raw_trails:
-        _add_within_trail_edges(raw_trail, sites, adjacency)
+        _add_within_trail_edges(raw_trail, snappable, adjacency)
     within_edges = sum(len(v) for v in adjacency.values()) // 2
-    log.debug("build_graph  within-trail edges: %d edges from %d trails  (%.3fs)",
-              within_edges, len(raw_trails), time.perf_counter() - t1)
+    log.debug("build_graph  within-trail edges: %d  (%.3fs)",
+              within_edges, time.perf_counter() - t1)
 
-    # Step 2 — cross-trail edges at shared OSM nodes (trailhead flag applies).
+    # Step 2 — cross-trail edges at shared OSM nodes.
     t2 = time.perf_counter()
-    _add_cross_trail_edges(raw_trails, sites, adjacency, allow_trailhead)
+    _add_cross_trail_edges(raw_trails, snappable, adjacency, allow_trailhead)
     total_edges = sum(len(v) for v in adjacency.values()) // 2
-    log.debug("build_graph  cross-trail edges: %d edges added  (%.3fs)",
+    log.debug("build_graph  cross-trail edges added: %d  (%.3fs)",
               total_edges - within_edges, time.perf_counter() - t2)
 
     isolated = sum(1 for v in adjacency.values() if not v)
@@ -143,31 +160,23 @@ def _add_within_trail_edges(
     adjacency: dict[str, set[str]],
 ) -> None:
     """
-    Snap all sites to one trail polyline, sort by position, and connect
-    each consecutive pair.
-
-    Within-trail edges are always valid — a hiker moves directly from
-    one site to the next along the continuous trail without any gap or
-    trailhead crossing.
+    Snap sites to a trail polyline, sort by position, connect consecutive pairs.
     """
     # Shapely uses (x=lon, y=lat) convention.
     line = LineString([(lon, lat) for lat, lon in raw_trail["points"]])
 
-    # Collect (position_along_line, division_id) for every site on this trail.
     snapped: list[tuple[float, str]] = []
-
     for div_id, site in sites.items():
         site_point = Point(site.lon, site.lat)
         if line.distance(site_point) > _SNAP_THRESHOLD_DEGREES:
-            continue  # site is not on this trail
+            continue
         position = line.project(site_point)
         snapped.append((position, div_id))
 
     if len(snapped) < 2:
-        return  # need at least 2 sites to form an edge
+        return
 
-    snapped.sort()  # sort by ascending position along the trail
-
+    snapped.sort()
     for i in range(len(snapped) - 1):
         _, id_a = snapped[i]
         _, id_b = snapped[i + 1]
@@ -187,19 +196,8 @@ def _add_cross_trail_edges(
 ) -> None:
     """
     For each pair of trails sharing an OSM node, connect the sites immediately
-    adjacent to the junction on each trail.
-
-    No camp sits physically at a junction node — instead, find the last snapped
-    site before the junction's position and the first after it on each trail,
-    and connect every such site on trail A with every such site on trail B.
-
-    A shared node is a trailhead connection when it is an endpoint of BOTH
-    trails (same parking lot). If only one trail treats it as an endpoint, it
-    is a genuine junction and is always included.
+    adjacent to that junction on each trail.
     """
-    # Pre-compute snapped-site positions for each trail.
-    # trail_info[osm_id] = {"line", "endpoint_nodes", "node_ids", "points", "snapped"}
-    # snapped is a sorted list of (position_along_line, division_id).
     trail_info: dict[str, dict] = {}
     for raw_trail in raw_trails:
         osm_id = raw_trail["osm_id"]
@@ -218,7 +216,6 @@ def _add_cross_trail_edges(
             "snapped": snapped,
         }
 
-    # Check every pair of trails for shared OSM nodes.
     for trail_a, trail_b in combinations(raw_trails, 2):
         osm_a = trail_a["osm_id"]
         osm_b = trail_b["osm_id"]
@@ -233,15 +230,13 @@ def _add_cross_trail_edges(
             ep_a = shared_node in info_a["endpoint_nodes"]
             ep_b = shared_node in info_b["endpoint_nodes"]
             if ep_a and ep_b and not allow_trailhead:
-                continue  # parking-lot trailhead — excluded per --trailhead flag
+                continue  # parking-lot trailhead — excluded
 
-            # Project the junction's coordinates onto each trail.
             node_idx = info_a["node_ids"].index(shared_node)
             junction_lat, junction_lon = info_a["points"][node_idx]
             junc_pos_a = info_a["line"].project(Point(junction_lon, junction_lat))
             junc_pos_b = info_b["line"].project(Point(junction_lon, junction_lat))
 
-            # Sites immediately flanking the junction on each trail.
             neighbors_a = _sites_adjacent_to_junction(info_a["snapped"], junc_pos_a)
             neighbors_b = _sites_adjacent_to_junction(info_b["snapped"], junc_pos_b)
 
@@ -252,23 +247,14 @@ def _add_cross_trail_edges(
                         adjacency[id_b].add(id_a)
 
 
-# ---------------------------------------------------------------------------
-# Geometry helpers
-# ---------------------------------------------------------------------------
-
 def _sites_adjacent_to_junction(
     snapped: list[tuple[float, str]],
     junction_pos: float,
 ) -> list[str]:
-    """
-    Return the sites immediately before and after junction_pos on this trail.
-
-    'Before' = snapped site with the largest position <= junction_pos.
-    'After'  = snapped site with the smallest position >  junction_pos.
-    """
+    """Return the sites immediately before and after junction_pos on a trail."""
     before: str | None = None
     after: str | None = None
-    for pos, div_id in snapped:  # sorted ascending
+    for pos, div_id in snapped:
         if pos <= junction_pos:
             before = div_id
         elif after is None:

@@ -3,7 +3,7 @@
 **Status:** Approved
 **Product Owner:** Michael Montgomery
 **Engineering Lead:** Michael Montgomery
-**Last Updated:** 2026-03-17
+**Last Updated:** 2026-04-13
 
 ---
 
@@ -104,7 +104,7 @@ point a summary of alerts fired is printed.
 **Kafka Topics:** N/A — CLI application.
 
 **Happy Path:**
-1. User runs `wa-permits --watch --park rainier --nights 3 --from 2026-07-01 --to 2026-07-31`
+1. User runs `wa-permits --watch --park rainier --nights 3 --start-date 2026-07-01 --live`
 2. First poll runs immediately; results are printed; baseline is stored in memory
 3. After 15 minutes, a second poll runs
 4. A new chain is found that was not in the baseline → printed with a `[NEW]` label
@@ -118,7 +118,7 @@ point a summary of alerts fired is printed.
 - User specifies `--interval 0` or a negative value → default to 15 minutes with a warning
 
 **Acceptance Criteria:**
-- [ ] `wa-permits --watch` accepts `--park`, `--nights`, `--from`, `--to`, and `--interval` (minutes, default 15)
+- [ ] `wa-permits --watch` accepts `--park`, `--start-date`, `--nights`, and `--interval` (minutes, default 15)
 - [ ] On each poll, results are diffed against the previous poll; new chains are labeled `[NEW]`
 - [ ] HTTP 429 responses trigger exponential backoff; the loop does not crash
 - [ ] `Ctrl+C` exits cleanly and prints a session summary
@@ -164,23 +164,21 @@ user can identify which park it belongs to.
 **Kafka Topics:** N/A.
 
 **Happy Path:**
-1. User runs `wa-permits --list-chains --all-parks --nights 4 --from 2026-08-01 --to 2026-08-31 --live`
+1. User runs `wa-permits --park all --nights 4 --start-date 2026-08-01 --live`
 2. CLI iterates over all supported parks, fetching availability and running chain search for each
 3. All results are merged and sorted by `min_remaining` descending
 4. Output table includes a `Park` column; top results from the most available park appear first
 
 **Edge Cases:**
-- `--all-parks` and `--park` used together → exit with error: "use --park or --all-parks, not both"
 - One park's API call fails (timeout or 404) → log the failure and continue with remaining parks; partial results are returned with a warning noting which park failed
 - No chains found across any park → print "No chains found across all parks for the specified criteria"
 - Supported parks list is empty (misconfiguration) → exit with a clear error
-- `--all-parks` used without `--live` → runs against mock data for all parks; useful for testing
+- `--park all` used without `--live` → runs against mock data for all parks; useful for testing
 
 **Acceptance Criteria:**
-- [ ] `wa-permits --list-chains --all-parks` returns chains from all supported parks in a single output
+- [ ] `wa-permits --park all` returns chains from all supported parks in a single output
 - [ ] Results are sorted by `min_remaining` descending
 - [ ] Each result row includes a `Park` column
-- [ ] `--all-parks` and `--park` are mutually exclusive; using both returns a clear error message
 - [ ] If one park's API call fails, results from other parks are still returned with a warning
 
 ---
@@ -216,10 +214,10 @@ stdout.
 **Kafka Topics:** N/A.
 
 **Happy Path:**
-1. User runs `wa-permits --list-chains --park rainier --nights 3 --json`
+1. User runs `wa-permits --park rainier --start-date 2026-07-22 --nights 3 --json`
 2. Rich table output is suppressed
 3. Valid, pretty-printed JSON is written to stdout
-4. User pipes output: `wa-permits --list-chains --park rainier --nights 3 --json | jq '.chains[0]'`
+4. User pipes output: `wa-permits --park rainier --start-date 2026-07-22 --nights 3 --json | jq '.parks[0].chains[0]'`
 
 **Edge Cases:**
 - `--json` and `--output` used together → JSON is written to the file; nothing is written to stdout except a confirmation of the file path
@@ -228,7 +226,7 @@ stdout.
 - `--json` used with `--watch` → each poll cycle emits a JSON object to stdout; one object per poll, not a single accumulated array (streaming-friendly)
 
 **Acceptance Criteria:**
-- [ ] `--json` flag is supported on all four CLI commands
+- [ ] `--json` flag is supported on chain search and `--list-availability`
 - [ ] JSON output is valid, pretty-printed, and written to stdout
 - [ ] Rich table rendering is fully suppressed when `--json` is active
 - [ ] An empty result set emits valid JSON with an empty array, not an empty or null output
@@ -415,8 +413,8 @@ sites correctly, and the CLI displays ZONE-type availability in a meaningful way
 | Module | Change |
 |--------|--------|
 | `api.py` | Validate and finalize `fetch_availability()` ZONE branch; confirm response shape handling matches live API |
-| `mock.py` | Add Enchantments mock data with ZONE-type availability shape |
-| `graph.py` | Ensure `build_graph()` handles ZONE site geometry correctly |
+| `mock.py` | Add Enchantments mock sites (with GPS coordinates) and synthetic OSM trail polylines for ZONE zones |
+| `graph.py` | No structural changes; `build_graph()` GPS-snaps Enchantments sites to Overpass trail polylines exactly as it does for ITINERARY parks |
 | `cli.py` | Display ZONE availability with zone name and capacity; label permit type as `ZONE` in output |
 
 **External APIs:**
@@ -424,7 +422,7 @@ sites correctly, and the CLI displays ZONE-type availability in a meaningful way
 | API | Usage |
 |-----|-------|
 | Recreation.gov ZONE availability endpoint | Different response shape from ITINERARY; availability is per zone, not per campsite |
-| OpenStreetMap Overpass | Trail data for Enchantments area |
+| OpenStreetMap Overpass | Trail polylines for Enchantments area — same fetch path as other parks |
 
 **Database / Local State:** None.
 
